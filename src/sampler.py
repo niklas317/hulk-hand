@@ -12,7 +12,9 @@ from dataset import GestureDataset
 
 
 BATCH_SIZE = 128
-SAMPLES_PER_SOURCE_PER_BATCH = 64
+
+OLD_SAMPLES_PER_BATCH = 32
+NEW_SAMPLES_PER_BATCH = 96
 
 BATCHES_PER_EPOCH = 141
 
@@ -20,8 +22,13 @@ SAMPLES_PER_EPOCH = (
     BATCH_SIZE * BATCHES_PER_EPOCH
 )
 
-SAMPLES_PER_SOURCE_PER_EPOCH = (
-    SAMPLES_PER_SOURCE_PER_BATCH
+OLD_SAMPLES_PER_EPOCH = (
+    OLD_SAMPLES_PER_BATCH
+    * BATCHES_PER_EPOCH
+)
+
+NEW_SAMPLES_PER_EPOCH = (
+    NEW_SAMPLES_PER_BATCH
     * BATCHES_PER_EPOCH
 )
 
@@ -34,8 +41,8 @@ class BalancedOldNewBatchSampler(
 
     Every batch contains exactly:
 
-        64 OLD samples
-        64 NEW samples
+        32 OLD samples
+        96 NEW samples
 
     Over one epoch, OLD and NEW are independently
     class-balanced as evenly as mathematically possible.
@@ -47,8 +54,11 @@ class BalancedOldNewBatchSampler(
 
         = 18,048 samples / epoch
 
-        9,024 OLD
-        9,024 NEW
+        4,512 OLD
+        13,536 NEW
+
+        = 25% OLD
+        = 75% NEW
 
     The sampler is intended to be used with:
 
@@ -327,7 +337,7 @@ class BalancedOldNewBatchSampler(
                     self.old_indices_by_class
                 ),
                 total_samples=(
-                    SAMPLES_PER_SOURCE_PER_EPOCH
+                    OLD_SAMPLES_PER_EPOCH
                 ),
                 rng=rng,
             )
@@ -339,7 +349,7 @@ class BalancedOldNewBatchSampler(
                     self.new_indices_by_class
                 ),
                 total_samples=(
-                    SAMPLES_PER_SOURCE_PER_EPOCH
+                    NEW_SAMPLES_PER_EPOCH
                 ),
                 rng=rng,
             )
@@ -349,18 +359,30 @@ class BalancedOldNewBatchSampler(
             BATCHES_PER_EPOCH
         ):
 
-            start = (
+            old_start = (
                 batch_index
-                * SAMPLES_PER_SOURCE_PER_BATCH
+                * OLD_SAMPLES_PER_BATCH
             )
 
-            end = (
-                start
-                + SAMPLES_PER_SOURCE_PER_BATCH
+            old_end = (
+                old_start
+                + OLD_SAMPLES_PER_BATCH
+            )
+
+            new_start = (
+                batch_index
+                * NEW_SAMPLES_PER_BATCH
+            )
+
+            new_end = (
+                new_start
+                + NEW_SAMPLES_PER_BATCH
             )
 
             old_batch = (
-                old_indices[start:end]
+                old_indices[
+                    old_start:old_end
+                ]
             )
 
             # NEW indices need an offset because
@@ -371,7 +393,9 @@ class BalancedOldNewBatchSampler(
             new_batch = [
                 index + self.new_offset
                 for index
-                in new_indices[start:end]
+                in new_indices[
+                    new_start:new_end
+                ]
             ]
 
             batch = (
@@ -384,6 +408,18 @@ class BalancedOldNewBatchSampler(
             rng.shuffle(
                 batch
             )
+
+            if len(old_batch) != OLD_SAMPLES_PER_BATCH:
+                raise RuntimeError(
+                    "Internal sampler error: "
+                    "incorrect OLD batch size."
+                )
+
+            if len(new_batch) != NEW_SAMPLES_PER_BATCH:
+                raise RuntimeError(
+                    "Internal sampler error: "
+                    "incorrect NEW batch size."
+                )
 
             if len(batch) != BATCH_SIZE:
                 raise RuntimeError(
@@ -414,7 +450,7 @@ def build_training_dataset_and_sampler(
     Returns:
 
         combined training dataset
-        balanced OLD/NEW batch sampler
+        class-balanced 25% OLD / 75% NEW batch sampler
     """
 
     combined_dataset = ConcatDataset(

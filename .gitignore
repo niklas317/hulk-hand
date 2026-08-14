@@ -218,5 +218,5 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Repo related
-checkpoints
-dataset*
+/checkpoints
+/dataset*

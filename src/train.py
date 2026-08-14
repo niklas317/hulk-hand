@@ -866,7 +866,7 @@ def print_training_header(
     )
 
     print(
-        "OLD / NEW:           50% / 50%"
+        "OLD / NEW:           25% / 75%"
     )
 
     print(
