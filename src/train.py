@@ -9,17 +9,18 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
-)
+from torch.optim import SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import build_datasets
-from model import HulkHandResNet18, build_model
+from model import (
+    DINOV2_MODEL,
+    EMBEDDING_DIM,
+    HulkHandDinoV2,
+    build_model,
+)
 from sampler import (
     BATCH_SIZE,
     BATCHES_PER_EPOCH,
@@ -32,17 +33,14 @@ from sampler import (
 # Training configuration
 # ---------------------------------------------------------------------------
 
+MODEL_ID = "dinov2_vits14_linear_probe_opset13"
+
 MAX_EPOCHS = 30
 
-WARMUP_EPOCHS = 3
-WARMUP_START_FACTOR = 0.10
+CLASSIFIER_LR = 1e-2
 
-LAYER4_LR = 3e-5
-CLASSIFIER_LR = 1.5e-4
-
-WEIGHT_DECAY = 1e-4
-
-GRADIENT_CLIP_NORM = 1.0
+MOMENTUM = 0.9
+WEIGHT_DECAY = 0.0
 
 EARLY_STOPPING_PATIENCE = 5
 
@@ -50,20 +48,34 @@ VALIDATION_BATCH_SIZE = 128
 
 PRECISION = "fp32"
 
+SOURCE_SPLIT = "25% OLD / 75% NEW"
+
 
 # ---------------------------------------------------------------------------
 # Reproducibility
 # ---------------------------------------------------------------------------
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
+def set_seed(
+    seed: int,
+) -> None:
+
+    random.seed(
+        seed
+    )
+
+    torch.manual_seed(
+        seed
+    )
 
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(
+            seed
+        )
 
 
-def seed_worker(worker_id: int) -> None:
+def seed_worker(
+    worker_id: int,
+) -> None:
     """
     Seed Python's random module inside DataLoader workers.
 
@@ -73,8 +85,99 @@ def seed_worker(worker_id: int) -> None:
 
     del worker_id
 
-    worker_seed = torch.initial_seed() % (2**32)
-    random.seed(worker_seed)
+    worker_seed = (
+        torch.initial_seed()
+        % (2**32)
+    )
+
+    random.seed(
+        worker_seed
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model validation
+# ---------------------------------------------------------------------------
+
+def validate_linear_probe_model(
+    model: HulkHandDinoV2,
+) -> None:
+    """
+    V5 Phase 1 is intentionally a strict linear probe.
+
+    The entire DINOv2 backbone must remain frozen.
+
+    Only:
+
+        classifier.weight
+        classifier.bias
+
+    may be trainable.
+    """
+
+    backbone_trainable = [
+        name
+        for name, parameter
+        in model.backbone.named_parameters()
+        if parameter.requires_grad
+    ]
+
+    if backbone_trainable:
+        raise RuntimeError(
+            "DINOv2 backbone contains trainable "
+            "parameters:\n"
+            + "\n".join(
+                backbone_trainable
+            )
+        )
+
+    trainable_names = {
+        name
+        for name, parameter
+        in model.named_parameters()
+        if parameter.requires_grad
+    }
+
+    expected = {
+        "classifier.weight",
+        "classifier.bias",
+    }
+
+    if trainable_names != expected:
+        raise RuntimeError(
+            "Unexpected trainable parameters.\n"
+            f"Expected: {sorted(expected)}\n"
+            f"Actual:   {sorted(trainable_names)}"
+        )
+
+
+def count_parameters(
+    model: nn.Module,
+) -> tuple[int, int, int]:
+
+    total = sum(
+        parameter.numel()
+        for parameter
+        in model.parameters()
+    )
+
+    trainable = sum(
+        parameter.numel()
+        for parameter
+        in model.parameters()
+        if parameter.requires_grad
+    )
+
+    frozen = (
+        total
+        - trainable
+    )
+
+    return (
+        total,
+        frozen,
+        trainable,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -82,22 +185,13 @@ def seed_worker(worker_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def build_optimizer(
-    model: HulkHandResNet18,
-) -> AdamW:
+    model: HulkHandDinoV2,
+) -> SGD:
 
-    return AdamW(
-        [
-            {
-                "params": model.layer4.parameters(),
-                "lr": LAYER4_LR,
-                "name": "layer4",
-            },
-            {
-                "params": model.classifier.parameters(),
-                "lr": CLASSIFIER_LR,
-                "name": "classifier",
-            },
-        ],
+    return SGD(
+        model.classifier.parameters(),
+        lr=CLASSIFIER_LR,
+        momentum=MOMENTUM,
         weight_decay=WEIGHT_DECAY,
     )
 
@@ -107,31 +201,13 @@ def build_optimizer(
 # ---------------------------------------------------------------------------
 
 def build_scheduler(
-    optimizer: AdamW,
-) -> SequentialLR:
+    optimizer: SGD,
+) -> CosineAnnealingLR:
 
-    warmup = LinearLR(
+    return CosineAnnealingLR(
         optimizer,
-        start_factor=WARMUP_START_FACTOR,
-        end_factor=1.0,
-        total_iters=WARMUP_EPOCHS,
-    )
-
-    cosine = CosineAnnealingLR(
-        optimizer,
-        T_max=MAX_EPOCHS - WARMUP_EPOCHS,
+        T_max=MAX_EPOCHS,
         eta_min=0.0,
-    )
-
-    return SequentialLR(
-        optimizer,
-        schedulers=[
-            warmup,
-            cosine,
-        ],
-        milestones=[
-            WARMUP_EPOCHS,
-        ],
     )
 
 
@@ -149,10 +225,15 @@ def build_train_loader(
 ) -> DataLoader:
 
     generator = torch.Generator()
-    generator.manual_seed(seed + epoch)
+
+    generator.manual_seed(
+        seed + epoch
+    )
 
     # Epoch 1 -> sampler epoch 0.
-    batch_sampler.set_epoch(epoch - 1)
+    batch_sampler.set_epoch(
+        epoch - 1
+    )
 
     return DataLoader(
         combined_dataset,
@@ -192,7 +273,10 @@ def require_finite_tensor(
     batch_index: int,
 ) -> None:
 
-    if not torch.isfinite(tensor).all():
+    if not torch.isfinite(
+        tensor
+    ).all():
+
         raise FloatingPointError(
             f"Non-finite values detected in {name} "
             f"during epoch {epoch}, batch {batch_index}."
@@ -206,7 +290,10 @@ def require_finite_loss(
     phase: str,
 ) -> None:
 
-    if not torch.isfinite(loss):
+    if not torch.isfinite(
+        loss
+    ):
+
         raise FloatingPointError(
             f"Non-finite {phase} loss during "
             f"epoch {epoch}, batch {batch_index}: "
@@ -214,20 +301,61 @@ def require_finite_loss(
         )
 
 
+def calculate_gradient_norm(
+    parameters: list[torch.Tensor],
+) -> torch.Tensor:
+
+    squared_norms = []
+
+    for parameter in parameters:
+
+        if parameter.grad is None:
+            continue
+
+        squared_norms.append(
+            torch.sum(
+                parameter.grad.detach()
+                * parameter.grad.detach()
+            )
+        )
+
+    if not squared_norms:
+
+        raise RuntimeError(
+            "No gradients were available for "
+            "gradient-norm calculation."
+        )
+
+    total_squared = torch.stack(
+        squared_norms
+    ).sum()
+
+    return torch.sqrt(
+        total_squared
+    )
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
 def train_one_epoch(
-    model: HulkHandResNet18,
+    model: HulkHandDinoV2,
     loader: DataLoader,
     criterion: nn.Module,
-    optimizer: AdamW,
+    optimizer: SGD,
     device: torch.device,
     epoch: int,
 ) -> tuple[float, float]:
 
     model.train()
+
+    # HulkHandDinoV2.train() keeps the frozen backbone
+    # permanently in eval mode.
+    if model.backbone.training:
+        raise RuntimeError(
+            "Frozen DINOv2 backbone entered training mode."
+        )
 
     total_loss = 0.0
     total_correct = 0
@@ -238,6 +366,11 @@ def train_one_epoch(
         for parameter in model.parameters()
         if parameter.requires_grad
     ]
+
+    if not trainable_parameters:
+        raise RuntimeError(
+            "Model contains no trainable parameters."
+        )
 
     progress = tqdm(
         loader,
@@ -269,12 +402,28 @@ def train_one_epoch(
         # FP32 forward
         # ------------------------------------------------------
 
-        outputs = model(images)
-        logits = outputs["logits"]
+        outputs = model(
+            images
+        )
+
+        logits = outputs[
+            "logits"
+        ]
+
+        embedding = outputs[
+            "embedding"
+        ]
 
         require_finite_tensor(
             logits,
             name="training logits",
+            epoch=epoch,
+            batch_index=batch_index,
+        )
+
+        require_finite_tensor(
+            embedding,
+            name="training embedding",
             epoch=epoch,
             batch_index=batch_index,
         )
@@ -297,22 +446,10 @@ def train_one_epoch(
 
         loss.backward()
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            trainable_parameters,
-            max_norm=GRADIENT_CLIP_NORM,
-        )
-
-        if not torch.isfinite(
-            torch.as_tensor(grad_norm)
+        # Check every trainable gradient.
+        for name, parameter in (
+            model.named_parameters()
         ):
-            raise FloatingPointError(
-                "Non-finite gradient norm during "
-                f"epoch {epoch}, batch {batch_index}: "
-                f"{float(grad_norm)}"
-            )
-
-        # Check individual trainable gradients as well.
-        for name, parameter in model.named_parameters():
 
             if not parameter.requires_grad:
                 continue
@@ -327,18 +464,37 @@ def train_one_epoch(
             if not torch.isfinite(
                 parameter.grad
             ).all():
+
                 raise FloatingPointError(
                     f"Non-finite gradient in '{name}' during "
                     f"epoch {epoch}, batch {batch_index}."
                 )
 
+        gradient_norm = (
+            calculate_gradient_norm(
+                trainable_parameters
+            )
+        )
+
+        if not torch.isfinite(
+            gradient_norm
+        ):
+
+            raise FloatingPointError(
+                "Non-finite gradient norm during "
+                f"epoch {epoch}, batch {batch_index}."
+            )
+
+        # No gradient clipping for the V5 linear probe.
         optimizer.step()
 
         # ------------------------------------------------------
         # Metrics
         # ------------------------------------------------------
 
-        batch_size = labels.size(0)
+        batch_size = labels.size(
+            0
+        )
 
         total_loss += (
             loss.detach().item()
@@ -346,7 +502,7 @@ def train_one_epoch(
         )
 
         predictions = logits.argmax(
-            dim=1,
+            dim=1
         )
 
         total_correct += (
@@ -356,7 +512,9 @@ def train_one_epoch(
             .item()
         )
 
-        total_samples += batch_size
+        total_samples += (
+            batch_size
+        )
 
         running_loss = (
             total_loss
@@ -379,8 +537,10 @@ def train_one_epoch(
         )
 
     return (
-        total_loss / total_samples,
-        total_correct / total_samples,
+        total_loss
+        / total_samples,
+        total_correct
+        / total_samples,
     )
 
 
@@ -390,7 +550,7 @@ def train_one_epoch(
 
 @torch.inference_mode()
 def evaluate(
-    model: HulkHandResNet18,
+    model: HulkHandDinoV2,
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
@@ -425,12 +585,28 @@ def evaluate(
             non_blocking=True,
         )
 
-        outputs = model(images)
-        logits = outputs["logits"]
+        outputs = model(
+            images
+        )
+
+        logits = outputs[
+            "logits"
+        ]
+
+        embedding = outputs[
+            "embedding"
+        ]
 
         require_finite_tensor(
             logits,
             name=f"{description} logits",
+            epoch=epoch,
+            batch_index=batch_index,
+        )
+
+        require_finite_tensor(
+            embedding,
+            name=f"{description} embedding",
             epoch=epoch,
             batch_index=batch_index,
         )
@@ -447,7 +623,9 @@ def evaluate(
             phase=description,
         )
 
-        batch_size = labels.size(0)
+        batch_size = labels.size(
+            0
+        )
 
         total_loss += (
             loss.item()
@@ -455,7 +633,7 @@ def evaluate(
         )
 
         predictions = logits.argmax(
-            dim=1,
+            dim=1
         )
 
         total_correct += (
@@ -465,7 +643,9 @@ def evaluate(
             .item()
         )
 
-        total_samples += batch_size
+        total_samples += (
+            batch_size
+        )
 
     if total_samples == 0:
         raise RuntimeError(
@@ -473,8 +653,10 @@ def evaluate(
         )
 
     return (
-        total_loss / total_samples,
-        total_correct / total_samples,
+        total_loss
+        / total_samples,
+        total_correct
+        / total_samples,
     )
 
 
@@ -490,9 +672,10 @@ def capture_rng_state() -> dict[str, Any]:
     }
 
     if torch.cuda.is_available():
-        state["cuda"] = (
-            torch.cuda.get_rng_state_all()
-        )
+
+        state[
+            "cuda"
+        ] = torch.cuda.get_rng_state_all()
 
     return state
 
@@ -518,6 +701,7 @@ def restore_rng_state(
         torch.cuda.is_available()
         and "cuda" in state
     ):
+
         torch.cuda.set_rng_state_all(
             state["cuda"]
         )
@@ -528,9 +712,9 @@ def restore_rng_state(
 # ---------------------------------------------------------------------------
 
 def build_checkpoint(
-    model: HulkHandResNet18,
-    optimizer: AdamW,
-    scheduler: SequentialLR,
+    model: HulkHandDinoV2,
+    optimizer: SGD,
+    scheduler: CosineAnnealingLR,
     epoch: int,
     best_new_val_accuracy: float,
     early_stopping_counter: int,
@@ -546,6 +730,8 @@ def build_checkpoint(
 
     return {
         "epoch": epoch,
+
+        "model_id": MODEL_ID,
 
         "model_state_dict": (
             model.state_dict()
@@ -569,33 +755,64 @@ def build_checkpoint(
 
         "classes": classes,
 
-        "class_to_idx": class_to_idx,
+        "class_to_idx": (
+            class_to_idx
+        ),
 
-        "num_classes": len(classes),
+        "num_classes": (
+            len(classes)
+        ),
 
         "metrics": {
-            "train_loss": train_loss,
-            "train_accuracy": train_accuracy,
-            "old_val_loss": old_val_loss,
-            "old_val_accuracy": old_val_accuracy,
-            "new_val_loss": new_val_loss,
-            "new_val_accuracy": new_val_accuracy,
+            "train_loss": (
+                train_loss
+            ),
+            "train_accuracy": (
+                train_accuracy
+            ),
+            "old_val_loss": (
+                old_val_loss
+            ),
+            "old_val_accuracy": (
+                old_val_accuracy
+            ),
+            "new_val_loss": (
+                new_val_loss
+            ),
+            "new_val_accuracy": (
+                new_val_accuracy
+            ),
         },
 
         "training_config": {
+            "model_id": MODEL_ID,
+            "backbone": DINOV2_MODEL,
+            "embedding_dim": EMBEDDING_DIM,
             "precision": PRECISION,
-            "max_epochs": MAX_EPOCHS,
-            "warmup_epochs": WARMUP_EPOCHS,
-            "warmup_start_factor": WARMUP_START_FACTOR,
-            "layer4_lr": LAYER4_LR,
+            "training_mode": "linear_probe",
+            "backbone_frozen": True,
             "classifier_lr": CLASSIFIER_LR,
+            "optimizer": "sgd",
+            "momentum": MOMENTUM,
             "weight_decay": WEIGHT_DECAY,
-            "gradient_clip_norm": GRADIENT_CLIP_NORM,
-            "early_stopping_patience": EARLY_STOPPING_PATIENCE,
+            "scheduler": "cosine",
+            "warmup_epochs": 0,
+            "gradient_clipping": False,
+            "early_stopping_patience": (
+                EARLY_STOPPING_PATIENCE
+            ),
+            "max_epochs": MAX_EPOCHS,
             "batch_size": BATCH_SIZE,
-            "validation_batch_size": VALIDATION_BATCH_SIZE,
-            "batches_per_epoch": BATCHES_PER_EPOCH,
-            "samples_per_epoch": SAMPLES_PER_EPOCH,
+            "validation_batch_size": (
+                VALIDATION_BATCH_SIZE
+            ),
+            "batches_per_epoch": (
+                BATCHES_PER_EPOCH
+            ),
+            "samples_per_epoch": (
+                SAMPLES_PER_EPOCH
+            ),
+            "source_split": SOURCE_SPLIT,
         },
 
         "rng_state": (
@@ -611,8 +828,8 @@ def save_checkpoint(
     """
     Atomic checkpoint write.
 
-    The previous checkpoint remains intact if the new write
-    is interrupted before replacement.
+    The previous checkpoint remains intact if the new
+    write is interrupted before replacement.
     """
 
     path.parent.mkdir(
@@ -620,8 +837,10 @@ def save_checkpoint(
         exist_ok=True,
     )
 
-    temporary_path = path.with_name(
-        path.name + ".tmp"
+    temporary_path = (
+        path.with_name(
+            path.name + ".tmp"
+        )
     )
 
     torch.save(
@@ -650,6 +869,7 @@ def load_checkpoint_file(
         )
 
     try:
+
         checkpoint = torch.load(
             path,
             map_location="cpu",
@@ -657,6 +877,7 @@ def load_checkpoint_file(
         )
 
     except TypeError:
+
         checkpoint = torch.load(
             path,
             map_location="cpu",
@@ -666,12 +887,14 @@ def load_checkpoint_file(
         checkpoint,
         dict,
     ):
+
         raise RuntimeError(
             "Invalid training checkpoint."
         )
 
     required_keys = {
         "epoch",
+        "model_id",
         "model_state_dict",
         "optimizer_state_dict",
         "scheduler_state_dict",
@@ -683,31 +906,46 @@ def load_checkpoint_file(
 
     missing = (
         required_keys
-        - set(checkpoint.keys())
+        - set(
+            checkpoint.keys()
+        )
     )
 
     if missing:
+
         raise RuntimeError(
             "Resume checkpoint is missing keys: "
-            + ", ".join(sorted(missing))
+            + ", ".join(
+                sorted(
+                    missing
+                )
+            )
         )
 
     return checkpoint
 
 
 def move_optimizer_state_to_device(
-    optimizer: AdamW,
+    optimizer: SGD,
     device: torch.device,
 ) -> None:
 
-    for state in optimizer.state.values():
-        for key, value in state.items():
+    for state in (
+        optimizer.state.values()
+    ):
+
+        for key, value in (
+            state.items()
+        ):
 
             if isinstance(
                 value,
                 torch.Tensor,
             ):
-                state[key] = value.to(
+
+                state[
+                    key
+                ] = value.to(
                     device
                 )
 
@@ -722,15 +960,35 @@ def validate_resume_checkpoint(
     class_to_idx: dict[str, int],
 ) -> None:
 
-    saved_classes = checkpoint.get(
-        "classes"
+    saved_model_id = (
+        checkpoint.get(
+            "model_id"
+        )
     )
 
-    saved_mapping = checkpoint.get(
-        "class_to_idx"
+    if saved_model_id != MODEL_ID:
+
+        raise RuntimeError(
+            "Resume checkpoint belongs to a "
+            "different model configuration.\n"
+            f"Expected: {MODEL_ID}\n"
+            f"Actual:   {saved_model_id}"
+        )
+
+    saved_classes = (
+        checkpoint.get(
+            "classes"
+        )
+    )
+
+    saved_mapping = (
+        checkpoint.get(
+            "class_to_idx"
+        )
     )
 
     if saved_classes != classes:
+
         raise RuntimeError(
             "Dataset classes differ from the "
             "resume checkpoint.\n"
@@ -739,43 +997,73 @@ def validate_resume_checkpoint(
         )
 
     if saved_mapping != class_to_idx:
+
         raise RuntimeError(
             "Class mapping differs from the "
             "resume checkpoint."
         )
 
-    saved_num_classes = checkpoint.get(
-        "num_classes"
+    saved_num_classes = (
+        checkpoint.get(
+            "num_classes"
+        )
     )
 
     if (
         saved_num_classes is not None
-        and int(saved_num_classes) != len(classes)
+        and int(
+            saved_num_classes
+        ) != len(
+            classes
+        )
     ):
+
         raise RuntimeError(
-            "Number of classes differs from the "
-            "resume checkpoint."
+            "Number of classes differs from "
+            "the resume checkpoint."
         )
 
-    training_config = checkpoint.get(
-        "training_config",
-        {},
+    training_config = (
+        checkpoint.get(
+            "training_config",
+            {},
+        )
     )
 
-    saved_precision = training_config.get(
-        "precision"
+    saved_precision = (
+        training_config.get(
+            "precision"
+        )
     )
 
-    # Reject explicitly non-FP32 checkpoints.
-    # Older checkpoints without a precision field are allowed.
     if (
         saved_precision is not None
-        and saved_precision != PRECISION
+        and saved_precision
+        != PRECISION
     ):
+
         raise RuntimeError(
             "Resume checkpoint was created with "
-            f"precision '{saved_precision}', but this "
-            f"training pipeline requires '{PRECISION}'."
+            f"precision '{saved_precision}', but "
+            f"this pipeline requires '{PRECISION}'."
+        )
+
+    saved_training_mode = (
+        training_config.get(
+            "training_mode"
+        )
+    )
+
+    if (
+        saved_training_mode
+        is not None
+        and saved_training_mode
+        != "linear_probe"
+    ):
+
+        raise RuntimeError(
+            "Resume checkpoint is not a "
+            "DINOv2 linear-probe checkpoint."
         )
 
 
@@ -788,22 +1076,38 @@ def print_training_header(
     classes: list[str],
     output_dir: Path,
     datasets: dict,
+    model: HulkHandDinoV2,
 ) -> None:
 
+    (
+        total_parameters,
+        frozen_parameters,
+        trainable_parameters,
+    ) = count_parameters(
+        model
+    )
+
     print()
-    print("hulk-hand training")
-    print("==================")
+    print(
+        "hulk-hand DINOv2 training"
+    )
+    print(
+        "========================="
+    )
     print()
 
     print(
-        f"PyTorch:             {torch.__version__}"
+        f"PyTorch:             "
+        f"{torch.__version__}"
     )
 
     print(
-        f"Device:              {device}"
+        f"Device:              "
+        f"{device}"
     )
 
     if device.type == "cuda":
+
         print(
             "GPU:                 "
             f"{torch.cuda.get_device_name(0)}"
@@ -815,16 +1119,62 @@ def print_training_header(
         )
 
     print(
-        f"Precision:           {PRECISION.upper()}"
+        f"Precision:           "
+        f"{PRECISION.upper()}"
     )
 
     print(
-        f"Classes:             {len(classes)}"
+        f"Backbone:            "
+        f"{DINOV2_MODEL}"
+    )
+
+    print(
+        "Training mode:       "
+        "linear probe"
+    )
+
+    print(
+        "Backbone frozen:     yes"
+    )
+
+    print(
+        "Attention:           "
+        "Opset13 classic"
+    )
+
+    print(
+        f"Embedding dim:       "
+        f"{EMBEDDING_DIM}"
+    )
+
+    print()
+
+    print(
+        f"Total parameters:    "
+        f"{total_parameters:,}"
+    )
+
+    print(
+        f"Frozen parameters:   "
+        f"{frozen_parameters:,}"
+    )
+
+    print(
+        f"Trainable parameters:"
+        f" {trainable_parameters:,}"
+    )
+
+    print()
+
+    print(
+        f"Classes:             "
+        f"{len(classes)}"
     )
 
     for index, class_name in enumerate(
         classes
     ):
+
         print(
             f"  {index}: {class_name}"
         )
@@ -832,57 +1182,90 @@ def print_training_header(
     print()
 
     print(
-        f"OLD train:           {len(datasets['old_train'])}"
+        f"OLD train:           "
+        f"{len(datasets['old_train'])}"
     )
 
     print(
-        f"OLD val:             {len(datasets['old_val'])}"
+        f"OLD val:             "
+        f"{len(datasets['old_val'])}"
     )
 
     print(
-        f"NEW train:           {len(datasets['new_train'])}"
+        f"NEW train:           "
+        f"{len(datasets['new_train'])}"
     )
 
     print(
-        f"NEW val:             {len(datasets['new_val'])}"
+        f"NEW val:             "
+        f"{len(datasets['new_val'])}"
     )
 
     print(
-        f"NEW test:            {len(datasets['new_test'])}"
+        f"NEW test:            "
+        f"{len(datasets['new_test'])}"
     )
 
     print()
 
     print(
-        f"Batch size:          {BATCH_SIZE}"
+        f"Batch size:          "
+        f"{BATCH_SIZE}"
     )
 
     print(
-        f"Batches / epoch:     {BATCHES_PER_EPOCH}"
+        f"Batches / epoch:     "
+        f"{BATCHES_PER_EPOCH}"
     )
 
     print(
-        f"Samples / epoch:     {SAMPLES_PER_EPOCH}"
+        f"Samples / epoch:     "
+        f"{SAMPLES_PER_EPOCH}"
     )
 
     print(
-        "OLD / NEW:           25% / 75%"
+        f"OLD / NEW:           "
+        f"{SOURCE_SPLIT}"
+    )
+
+    print()
+
+    print(
+        f"Optimizer:           SGD"
     )
 
     print(
-        f"Maximum epochs:      {MAX_EPOCHS}"
+        f"Classifier LR:       "
+        f"{CLASSIFIER_LR}"
     )
 
     print(
-        f"Warm-up epochs:      {WARMUP_EPOCHS}"
+        f"Momentum:            "
+        f"{MOMENTUM}"
     )
 
     print(
-        f"LR layer4:           {LAYER4_LR}"
+        f"Weight decay:        "
+        f"{WEIGHT_DECAY}"
     )
 
     print(
-        f"LR classifier:       {CLASSIFIER_LR}"
+        "Warm-up epochs:      0"
+    )
+
+    print(
+        "Scheduler:           cosine"
+    )
+
+    print(
+        "Gradient clipping:   disabled"
+    )
+
+    print()
+
+    print(
+        f"Maximum epochs:      "
+        f"{MAX_EPOCHS}"
     )
 
     print(
@@ -891,7 +1274,8 @@ def print_training_header(
     )
 
     print(
-        f"Output:              {output_dir}"
+        f"Output:              "
+        f"{output_dir}"
     )
 
     print()
@@ -905,8 +1289,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Fine-tune the hulk-hand HaGRID "
-            "ResNet-18 model in FP32."
+            "Train the hulk-hand DINOv2 ViT-S/14 "
+            "linear classifier in FP32."
         )
     )
 
@@ -916,16 +1300,6 @@ def main() -> None:
         required=True,
         help=(
             "Root directory of the processed dataset."
-        ),
-    )
-
-    parser.add_argument(
-        "--hagrid-checkpoint",
-        type=Path,
-        default=None,
-        help=(
-            "Pretrained HaGRID ResNet-18 checkpoint. "
-            "Required for a fresh training run."
         ),
     )
 
@@ -943,7 +1317,7 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Resume training from a previous last.pt."
+            "Resume training from a V5 last.pt."
         ),
     )
 
@@ -982,17 +1356,9 @@ def main() -> None:
     # ------------------------------------------------------------------
 
     if args.num_workers < 0:
+
         raise ValueError(
             "--num-workers must be >= 0."
-        )
-
-    if (
-        args.resume is None
-        and args.hagrid_checkpoint is None
-    ):
-        raise ValueError(
-            "--hagrid-checkpoint is required "
-            "for a fresh training run."
         )
 
     # ------------------------------------------------------------------
@@ -1012,6 +1378,7 @@ def main() -> None:
     )
 
     if not data_dir.is_dir():
+
         raise FileNotFoundError(
             f"Dataset directory not found: {data_dir}"
         )
@@ -1031,25 +1398,6 @@ def main() -> None:
         / "last.pt"
     )
 
-    hagrid_checkpoint = None
-
-    if args.hagrid_checkpoint is not None:
-
-        hagrid_checkpoint = (
-            args.hagrid_checkpoint
-            .expanduser()
-            .resolve()
-        )
-
-        if (
-            args.resume is None
-            and not hagrid_checkpoint.is_file()
-        ):
-            raise FileNotFoundError(
-                "HaGRID checkpoint not found: "
-                f"{hagrid_checkpoint}"
-            )
-
     # ------------------------------------------------------------------
     # Device
     # ------------------------------------------------------------------
@@ -1061,7 +1409,8 @@ def main() -> None:
     )
 
     pin_memory = (
-        device.type == "cuda"
+        device.type
+        == "cuda"
     )
 
     set_seed(
@@ -1072,16 +1421,18 @@ def main() -> None:
     # Datasets
     # ------------------------------------------------------------------
 
-    datasets, classes, class_to_idx = (
-        build_datasets(
-            data_dir=data_dir,
-            image_size=224,
-            horizontal_flip=(
-                args.horizontal_flip
-            ),
-            old_val_fraction=0.10,
-            seed=args.seed,
-        )
+    (
+        datasets,
+        classes,
+        class_to_idx,
+    ) = build_datasets(
+        data_dir=data_dir,
+        image_size=224,
+        horizontal_flip=(
+            args.horizontal_flip
+        ),
+        old_val_fraction=0.10,
+        seed=args.seed,
     )
 
     old_train = datasets[
@@ -1103,22 +1454,34 @@ def main() -> None:
     # NEW test is intentionally not used here.
     # Sessions W-Z remain untouched until final evaluation.
 
-    if len(old_train) == 0:
+    if len(
+        old_train
+    ) == 0:
+
         raise RuntimeError(
             "OLD training dataset is empty."
         )
 
-    if len(new_train) == 0:
+    if len(
+        new_train
+    ) == 0:
+
         raise RuntimeError(
             "NEW training dataset is empty."
         )
 
-    if len(old_val) == 0:
+    if len(
+        old_val
+    ) == 0:
+
         raise RuntimeError(
             "OLD validation dataset is empty."
         )
 
-    if len(new_val) == 0:
+    if len(
+        new_val
+    ) == 0:
+
         raise RuntimeError(
             "NEW validation dataset is empty."
         )
@@ -1147,15 +1510,8 @@ def main() -> None:
         )
     )
 
-    print_training_header(
-        device=device,
-        classes=classes,
-        output_dir=output_dir,
-        datasets=datasets,
-    )
-
     # ------------------------------------------------------------------
-    # Model / resume checkpoint
+    # Resume checkpoint
     # ------------------------------------------------------------------
 
     resume_checkpoint = None
@@ -1174,21 +1530,52 @@ def main() -> None:
             class_to_idx,
         )
 
-        model = HulkHandResNet18(
-            num_classes=len(classes)
+    # ------------------------------------------------------------------
+    # Model
+    # ------------------------------------------------------------------
+
+    if resume_checkpoint is None:
+
+        print()
+        print(
+            "Loading pretrained DINOv2 "
+            "ViT-S/14 backbone..."
+        )
+        print()
+
+        model = build_model(
+            num_classes=len(
+                classes
+            ),
+            pretrained=True,
         )
 
     else:
 
-        assert hagrid_checkpoint is not None
-
+        # The full pretrained backbone is contained in
+        # last.pt, so pretrained weights do not need to
+        # be downloaded again.
         model = build_model(
-            num_classes=len(classes),
-            checkpoint_path=hagrid_checkpoint,
+            num_classes=len(
+                classes
+            ),
+            pretrained=False,
         )
+
+    validate_linear_probe_model(
+        model
+    )
 
     model.to(
         device
+    )
+
+    print_training_header(
+        device=device,
+        classes=classes,
+        output_dir=output_dir,
+        datasets=datasets,
+        model=model,
     )
 
     # ------------------------------------------------------------------
@@ -1203,7 +1590,9 @@ def main() -> None:
         optimizer
     )
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = (
+        nn.CrossEntropyLoss()
+    )
 
     start_epoch = 1
 
@@ -1249,7 +1638,8 @@ def main() -> None:
         )
 
         start_epoch = (
-            previous_epoch + 1
+            previous_epoch
+            + 1
         )
 
         best_new_val_accuracy = float(
@@ -1268,6 +1658,10 @@ def main() -> None:
             resume_checkpoint.get(
                 "rng_state"
             )
+        )
+
+        validate_linear_probe_model(
+            model
         )
 
         print(
@@ -1308,68 +1702,83 @@ def main() -> None:
 
         # Deterministic epoch-specific randomness.
         set_seed(
-            args.seed + epoch
+            args.seed
+            + epoch
         )
 
         train_loader = (
             build_train_loader(
-                combined_dataset=combined_train,
-                batch_sampler=batch_sampler,
+                combined_dataset=(
+                    combined_train
+                ),
+                batch_sampler=(
+                    batch_sampler
+                ),
                 epoch=epoch,
-                num_workers=args.num_workers,
-                pin_memory=pin_memory,
+                num_workers=(
+                    args.num_workers
+                ),
+                pin_memory=(
+                    pin_memory
+                ),
                 seed=args.seed,
             )
         )
 
-        current_lrs = [
-            group["lr"]
-            for group in optimizer.param_groups
-        ]
+        current_lr = (
+            optimizer.param_groups[
+                0
+            ][
+                "lr"
+            ]
+        )
 
         # --------------------------------------------------------------
         # Train
         # --------------------------------------------------------------
 
-        train_loss, train_accuracy = (
-            train_one_epoch(
-                model=model,
-                loader=train_loader,
-                criterion=criterion,
-                optimizer=optimizer,
-                device=device,
-                epoch=epoch,
-            )
+        (
+            train_loss,
+            train_accuracy,
+        ) = train_one_epoch(
+            model=model,
+            loader=train_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            device=device,
+            epoch=epoch,
         )
 
         # --------------------------------------------------------------
         # Validation
         # --------------------------------------------------------------
 
-        old_val_loss, old_val_accuracy = (
-            evaluate(
-                model=model,
-                loader=old_val_loader,
-                criterion=criterion,
-                device=device,
-                epoch=epoch,
-                description=(
-                    f"Epoch {epoch:02d} OLD val"
-                ),
-            )
+        (
+            old_val_loss,
+            old_val_accuracy,
+        ) = evaluate(
+            model=model,
+            loader=old_val_loader,
+            criterion=criterion,
+            device=device,
+            epoch=epoch,
+            description=(
+                f"Epoch {epoch:02d} OLD val"
+            ),
         )
 
-        new_val_loss, new_val_accuracy = (
-            evaluate(
-                model=model,
-                loader=new_val_loader,
-                criterion=criterion,
-                device=device,
-                epoch=epoch,
-                description=(
-                    f"Epoch {epoch:02d} NEW val"
-                ),
-            )
+        (
+            new_val_loss,
+            new_val_accuracy,
+        ) = evaluate(
+            model=model,
+            loader=new_val_loader,
+            criterion=criterion,
+            device=device,
+            epoch=epoch,
+            description=(
+                f"Epoch {epoch:02d} NEW val"
+            ),
         )
 
         # --------------------------------------------------------------
@@ -1393,7 +1802,7 @@ def main() -> None:
 
             early_stopping_counter += 1
 
-        # Scheduler advances only after the current epoch.
+        # Scheduler advances only after this epoch.
         scheduler.step()
 
         # --------------------------------------------------------------
@@ -1401,7 +1810,8 @@ def main() -> None:
         # --------------------------------------------------------------
 
         print(
-            f"Epoch {epoch:02d}/{MAX_EPOCHS}"
+            f"Epoch {epoch:02d}/"
+            f"{MAX_EPOCHS}"
         )
 
         print(
@@ -1435,13 +1845,8 @@ def main() -> None:
         )
 
         print(
-            f"  LR layer4:        "
-            f"{current_lrs[0]:.8f}"
-        )
-
-        print(
-            f"  LR classifier:    "
-            f"{current_lrs[1]:.8f}"
+            f"  Classifier LR:    "
+            f"{current_lr:.8f}"
         )
 
         print(
@@ -1451,6 +1856,7 @@ def main() -> None:
         )
 
         if improved:
+
             print(
                 "  BEST:             yes"
             )
@@ -1461,29 +1867,41 @@ def main() -> None:
         # Checkpoint
         # --------------------------------------------------------------
 
-        checkpoint = build_checkpoint(
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=epoch,
-            best_new_val_accuracy=(
-                best_new_val_accuracy
-            ),
-            early_stopping_counter=(
-                early_stopping_counter
-            ),
-            classes=classes,
-            class_to_idx=class_to_idx,
-            train_loss=train_loss,
-            train_accuracy=train_accuracy,
-            old_val_loss=old_val_loss,
-            old_val_accuracy=(
-                old_val_accuracy
-            ),
-            new_val_loss=new_val_loss,
-            new_val_accuracy=(
-                new_val_accuracy
-            ),
+        checkpoint = (
+            build_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                best_new_val_accuracy=(
+                    best_new_val_accuracy
+                ),
+                early_stopping_counter=(
+                    early_stopping_counter
+                ),
+                classes=classes,
+                class_to_idx=(
+                    class_to_idx
+                ),
+                train_loss=(
+                    train_loss
+                ),
+                train_accuracy=(
+                    train_accuracy
+                ),
+                old_val_loss=(
+                    old_val_loss
+                ),
+                old_val_accuracy=(
+                    old_val_accuracy
+                ),
+                new_val_loss=(
+                    new_val_loss
+                ),
+                new_val_accuracy=(
+                    new_val_accuracy
+                ),
+            )
         )
 
         # Always save complete latest state.
@@ -1492,8 +1910,8 @@ def main() -> None:
             last_path,
         )
 
-        # Save best checkpoint only when NEW validation
-        # accuracy improves.
+        # Save best checkpoint only when NEW
+        # validation accuracy improves.
         if improved:
 
             save_checkpoint(
@@ -1527,13 +1945,20 @@ def main() -> None:
             break
 
     print()
-    print("Training finished.")
     print(
-        f"Best checkpoint: {best_path}"
+        "Training finished."
     )
+
     print(
-        f"Last checkpoint: {last_path}"
+        f"Best checkpoint: "
+        f"{best_path}"
     )
+
+    print(
+        f"Last checkpoint: "
+        f"{last_path}"
+    )
+
     print()
 
 
