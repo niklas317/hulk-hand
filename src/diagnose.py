@@ -15,8 +15,15 @@ from dataset import (
     collect_new_samples,
     discover_classes,
 )
-from model import HulkHandResNet18
+from model import (
+    DINOV2_MODEL,
+    EMBEDDING_DIM,
+    HulkHandDinoV2,
+    build_model,
+)
 
+
+EXPECTED_MODEL_ID = "dinov2_vits14_v6_last2_opset13"
 
 VALIDATION_SESSIONS = (
     "S",
@@ -25,6 +32,10 @@ VALIDATION_SESSIONS = (
     "V",
 )
 
+
+# ---------------------------------------------------------------------------
+# Checkpoint
+# ---------------------------------------------------------------------------
 
 def load_checkpoint(
     path: Path,
@@ -42,6 +53,7 @@ def load_checkpoint(
         )
 
     try:
+
         checkpoint = torch.load(
             path,
             map_location="cpu",
@@ -49,6 +61,7 @@ def load_checkpoint(
         )
 
     except TypeError:
+
         checkpoint = torch.load(
             path,
             map_location="cpu",
@@ -63,6 +76,7 @@ def load_checkpoint(
         )
 
     required = {
+        "model_id",
         "model_state_dict",
         "classes",
         "class_to_idx",
@@ -84,6 +98,73 @@ def load_checkpoint(
 
     return checkpoint
 
+
+def validate_checkpoint(
+    checkpoint: dict,
+    classes: list[str],
+    class_to_idx: dict[str, int],
+) -> None:
+
+    model_id = checkpoint.get(
+        "model_id"
+    )
+
+    if model_id != EXPECTED_MODEL_ID:
+
+        raise RuntimeError(
+            "Checkpoint belongs to a different model.\n"
+            f"Expected: {EXPECTED_MODEL_ID}\n"
+            f"Actual:   {model_id}"
+        )
+
+    saved_classes = checkpoint[
+        "classes"
+    ]
+
+    saved_class_to_idx = checkpoint[
+        "class_to_idx"
+    ]
+
+    saved_num_classes = int(
+        checkpoint[
+            "num_classes"
+        ]
+    )
+
+    if saved_classes != classes:
+
+        raise RuntimeError(
+            "Checkpoint classes do not match dataset.\n"
+            f"Checkpoint: {saved_classes}\n"
+            f"Dataset:    {classes}"
+        )
+
+    if (
+        saved_class_to_idx
+        != class_to_idx
+    ):
+
+        raise RuntimeError(
+            "Checkpoint class mapping does not "
+            "match dataset class mapping."
+        )
+
+    if (
+        saved_num_classes
+        != len(classes)
+    ):
+
+        raise RuntimeError(
+            "Checkpoint class count does not "
+            "match dataset.\n"
+            f"Checkpoint: {saved_num_classes}\n"
+            f"Dataset:    {len(classes)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# DataLoader
+# ---------------------------------------------------------------------------
 
 def build_loader(
     samples,
@@ -108,8 +189,27 @@ def build_loader(
     )
 
 
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+def normalize_session_name(
+    session,
+) -> str:
+
+    return (
+        str(session)
+        .replace(
+            "session_",
+            "",
+        )
+        .upper()
+    )
+
+
+@torch.inference_mode()
 def evaluate_split(
-    model: HulkHandResNet18,
+    model: HulkHandDinoV2,
     loader: DataLoader,
     device: torch.device,
     classes: list[str],
@@ -121,7 +221,9 @@ def evaluate_split(
     list[int],
 ]:
 
-    num_classes = len(classes)
+    num_classes = len(
+        classes
+    )
 
     confusion = torch.zeros(
         (
@@ -146,83 +248,101 @@ def evaluate_split(
 
     model.eval()
 
-    with torch.inference_mode():
+    for batch in tqdm(
+        loader,
+        desc=description,
+        leave=False,
+    ):
 
-        for batch in tqdm(
-            loader,
-            desc=description,
-            leave=False,
+        images = batch[
+            "image"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        labels = batch[
+            "label"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        outputs = model(
+            images
+        )
+
+        logits = outputs[
+            "logits"
+        ]
+
+        embedding = outputs[
+            "embedding"
+        ]
+
+        if not torch.isfinite(
+            logits
+        ).all():
+
+            raise FloatingPointError(
+                "Non-finite logits detected "
+                f"in {description}."
+            )
+
+        if not torch.isfinite(
+            embedding
+        ).all():
+
+            raise FloatingPointError(
+                "Non-finite embedding detected "
+                f"in {description}."
+            )
+
+        predictions = logits.argmax(
+            dim=1
+        )
+
+        total_correct += (
+            predictions
+            .eq(labels)
+            .sum()
+            .item()
+        )
+
+        total_samples += (
+            labels.size(0)
+        )
+
+        labels_cpu = (
+            labels.cpu()
+        )
+
+        predictions_cpu = (
+            predictions.cpu()
+        )
+
+        for target, prediction in zip(
+            labels_cpu.tolist(),
+            predictions_cpu.tolist(),
         ):
 
-            images = batch["image"].to(
-                device,
-                non_blocking=True,
-            )
+            confusion[
+                target,
+                prediction,
+            ] += 1
 
-            labels = batch["label"].to(
-                device,
-                non_blocking=True,
-            )
+            class_total[
+                target
+            ] += 1
 
-            outputs = model(
-                images
-            )
+            if target == prediction:
 
-            logits = outputs[
-                "logits"
-            ]
-
-            if not torch.isfinite(
-                logits
-            ).all():
-                raise FloatingPointError(
-                    "Non-finite logits detected "
-                    f"in {description}."
-                )
-
-            predictions = logits.argmax(
-                dim=1
-            )
-
-            total_correct += (
-                predictions
-                .eq(labels)
-                .sum()
-                .item()
-            )
-
-            total_samples += (
-                labels.size(0)
-            )
-
-            labels_cpu = (
-                labels.cpu()
-            )
-
-            predictions_cpu = (
-                predictions.cpu()
-            )
-
-            for target, prediction in zip(
-                labels_cpu.tolist(),
-                predictions_cpu.tolist(),
-            ):
-
-                confusion[
-                    target,
-                    prediction,
-                ] += 1
-
-                class_total[
+                class_correct[
                     target
                 ] += 1
 
-                if target == prediction:
-                    class_correct[
-                        target
-                    ] += 1
-
     if total_samples == 0:
+
         raise RuntimeError(
             f"{description} dataset is empty."
         )
@@ -238,17 +358,25 @@ def evaluate_split(
         num_classes
     ):
 
-        if class_total[index] == 0:
-            accuracy = float("nan")
+        total = int(
+            class_total[
+                index
+            ].item()
+        )
+
+        if total == 0:
+
+            accuracy = float(
+                "nan"
+            )
 
         else:
+
             accuracy = (
                 class_correct[
                     index
                 ].item()
-                / class_total[
-                    index
-                ].item()
+                / total
             )
 
         per_class_accuracy.append(
@@ -263,6 +391,10 @@ def evaluate_split(
     )
 
 
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
 def print_confusion_matrix(
     confusion: torch.Tensor,
     classes: list[str],
@@ -272,15 +404,24 @@ def print_confusion_matrix(
         12,
         max(
             len(name)
-            for name in classes
+            for name
+            in classes
         ) + 2,
     )
 
     print()
-    print("Confusion matrix")
-    print("----------------")
-    print("Rows = true class")
-    print("Columns = predicted class")
+    print(
+        "Confusion matrix"
+    )
+    print(
+        "----------------"
+    )
+    print(
+        "Rows = true class"
+    )
+    print(
+        "Columns = predicted class"
+    )
     print()
 
     print(
@@ -334,8 +475,12 @@ def print_results(
 ) -> None:
 
     print()
-    print(title)
-    print("=" * len(title))
+    print(
+        title
+    )
+    print(
+        "=" * len(title)
+    )
     print()
 
     print(
@@ -344,8 +489,12 @@ def print_results(
     )
 
     print()
-    print("Per-class accuracy")
-    print("------------------")
+    print(
+        "Per-class accuracy"
+    )
+    print(
+        "------------------"
+    )
 
     for class_name, accuracy in zip(
         classes,
@@ -353,9 +502,11 @@ def print_results(
     ):
 
         if accuracy != accuracy:
+
             text = "N/A"
 
         else:
+
             text = (
                 f"{accuracy * 100:.2f}%"
             )
@@ -377,8 +528,12 @@ def print_session_results(
 ) -> None:
 
     print()
-    print("VALIDATION BY SESSION")
-    print("=====================")
+    print(
+        "VALIDATION BY SESSION"
+    )
+    print(
+        "====================="
+    )
     print()
 
     header = (
@@ -387,16 +542,22 @@ def print_session_results(
     )
 
     for class_name in classes:
+
         header += (
             f"{class_name:>16}"
         )
 
-    print(header)
+    print(
+        header
+    )
+
     print(
         "-" * len(header)
     )
 
-    for session in VALIDATION_SESSIONS:
+    for session in (
+        VALIDATION_SESSIONS
+    ):
 
         result = session_results[
             session
@@ -412,8 +573,11 @@ def print_session_results(
         ]:
 
             if accuracy != accuracy:
+
                 text = "N/A"
+
             else:
+
                 text = (
                     f"{accuracy * 100:.2f}%"
                 )
@@ -422,18 +586,23 @@ def print_session_results(
                 f"{text:>16}"
             )
 
-        print(line)
+        print(
+            line
+        )
 
     print()
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Diagnose NEW train versus NEW validation "
-            "performance using best.pt, including "
-            "per-session validation results."
+            "Diagnose the DINOv2 V6 best.pt "
+            "on NEW train A-R and NEW validation S-V."
         )
     )
 
@@ -451,7 +620,7 @@ def main() -> None:
         type=Path,
         required=True,
         help=(
-            "Path to best.pt."
+            "Path to the V6 best.pt."
         ),
     )
 
@@ -475,6 +644,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------
+    # Arguments / paths
+    # ------------------------------------------------------------------
+
     data_dir = (
         args.data_dir
         .expanduser()
@@ -488,68 +661,53 @@ def main() -> None:
     )
 
     if not data_dir.is_dir():
+
         raise FileNotFoundError(
             f"Dataset not found: {data_dir}"
         )
 
     if args.batch_size <= 0:
+
         raise ValueError(
             "--batch-size must be > 0."
         )
 
     if args.num_workers < 0:
+
         raise ValueError(
             "--num-workers must be >= 0."
         )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Classes
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
-    classes, class_to_idx = (
-        discover_classes(
-            data_dir
-        )
+    (
+        classes,
+        class_to_idx,
+    ) = discover_classes(
+        data_dir
     )
 
     checkpoint = load_checkpoint(
         checkpoint_path
     )
 
-    saved_classes = checkpoint[
-        "classes"
-    ]
-
-    saved_class_to_idx = checkpoint[
-        "class_to_idx"
-    ]
-
-    if saved_classes != classes:
-        raise RuntimeError(
-            "Checkpoint classes do not match dataset.\n"
-            f"Checkpoint: {saved_classes}\n"
-            f"Dataset:    {classes}"
-        )
-
-    if (
-        saved_class_to_idx
-        != class_to_idx
-    ):
-        raise RuntimeError(
-            "Checkpoint class mapping does not "
-            "match dataset class mapping."
-        )
+    validate_checkpoint(
+        checkpoint,
+        classes,
+        class_to_idx,
+    )
 
     num_classes = len(
         classes
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Deterministic evaluation preprocessing
     #
-    # IMPORTANT:
     # No training augmentation is used here.
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     eval_transform = (
         build_eval_transform(
@@ -557,9 +715,9 @@ def main() -> None:
         )
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Collect NEW samples
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     new_train_samples = (
         collect_new_samples(
@@ -577,50 +735,79 @@ def main() -> None:
         )
     )
 
-    # ----------------------------------------------------------
-    # Check validation session distribution
-    # ----------------------------------------------------------
+    if not new_train_samples:
+
+        raise RuntimeError(
+            "NEW training dataset is empty."
+        )
+
+    if not new_val_samples:
+
+        raise RuntimeError(
+            "NEW validation dataset is empty."
+        )
+
+    # ------------------------------------------------------------------
+    # Validation session distribution
+    # ------------------------------------------------------------------
 
     validation_session_counts = {
         session: 0
-        for session in VALIDATION_SESSIONS
+        for session
+        in VALIDATION_SESSIONS
     }
 
-    for sample in new_val_samples:
+    for sample in (
+        new_val_samples
+    ):
 
         session = (
-            str(sample.session)
-            .replace("session_", "")
-            .upper()
+            normalize_session_name(
+                sample.session
+            )
         )
 
         if (
             session
             in validation_session_counts
         ):
+
             validation_session_counts[
                 session
             ] += 1
 
-    for session in VALIDATION_SESSIONS:
+    for session in (
+        VALIDATION_SESSIONS
+    ):
 
         if (
             validation_session_counts[
                 session
             ] == 0
         ):
+
             raise RuntimeError(
                 "No samples found for validation "
                 f"session {session}."
             )
 
-    # ----------------------------------------------------------
-    # Loaders
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Device
+    # ------------------------------------------------------------------
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
 
     pin_memory = (
-        torch.cuda.is_available()
+        device.type == "cuda"
     )
+
+    # ------------------------------------------------------------------
+    # Loaders
+    # ------------------------------------------------------------------
 
     new_train_loader = (
         build_loader(
@@ -642,24 +829,30 @@ def main() -> None:
         )
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Model
-    # ----------------------------------------------------------
+    #
+    # pretrained=False:
+    # The full trained DINOv2 state is already stored in best.pt.
+    # We only need the architecture before loading state_dict.
+    # ------------------------------------------------------------------
 
-    device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
+    print()
+    print(
+        "Building DINOv2 V6 architecture..."
     )
+    print()
 
-    model = HulkHandResNet18(
-        num_classes=num_classes
+    model = build_model(
+        num_classes=num_classes,
+        pretrained=False,
     )
 
     model.load_state_dict(
         checkpoint[
             "model_state_dict"
-        ]
+        ],
+        strict=True,
     )
 
     model.to(
@@ -668,13 +861,17 @@ def main() -> None:
 
     model.eval()
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Header
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     print()
-    print("hulk-hand diagnosis")
-    print("===================")
+    print(
+        "hulk-hand DINOv2 V6 diagnosis"
+    )
+    print(
+        "============================="
+    )
     print()
 
     print(
@@ -687,6 +884,21 @@ def main() -> None:
         f"{checkpoint.get('epoch', 'unknown')}"
     )
 
+    print(
+        f"Model ID:         "
+        f"{checkpoint['model_id']}"
+    )
+
+    print(
+        f"Backbone:         "
+        f"{DINOV2_MODEL}"
+    )
+
+    print(
+        f"Embedding dim:    "
+        f"{EMBEDDING_DIM}"
+    )
+
     metrics = checkpoint.get(
         "metrics",
         {},
@@ -696,16 +908,19 @@ def main() -> None:
         "new_val_accuracy"
         in metrics
     ):
+
         print(
             "Saved NEW val:   "
             f"{metrics['new_val_accuracy'] * 100:.2f}%"
         )
 
     print(
-        f"Device:           {device}"
+        f"Device:           "
+        f"{device}"
     )
 
     if device.type == "cuda":
+
         print(
             f"GPU:              "
             f"{torch.cuda.get_device_name(0)}"
@@ -727,16 +942,18 @@ def main() -> None:
 
     print()
 
-    for session in VALIDATION_SESSIONS:
+    for session in (
+        VALIDATION_SESSIONS
+    ):
 
         print(
             f"Session {session}:        "
             f"{validation_session_counts[session]}"
         )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # NEW train
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     (
         train_accuracy,
@@ -751,9 +968,9 @@ def main() -> None:
         description="NEW train",
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # NEW validation
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     (
         val_accuracy,
@@ -768,31 +985,24 @@ def main() -> None:
         description="NEW val",
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Per-session validation
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     session_results = {}
 
-    for session in VALIDATION_SESSIONS:
+    for session in (
+        VALIDATION_SESSIONS
+    ):
 
-        session_samples = []
-
-        for sample in new_val_samples:
-
-            sample_session = (
-                str(sample.session)
-                .replace("session_", "")
-                .upper()
-            )
-
-            if (
-                sample_session
-                == session
-            ):
-                session_samples.append(
-                    sample
-                )
+        session_samples = [
+            sample
+            for sample
+            in new_val_samples
+            if normalize_session_name(
+                sample.session
+            ) == session
+        ]
 
         session_loader = (
             build_loader(
@@ -839,19 +1049,23 @@ def main() -> None:
             ),
         }
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Results
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     print_results(
         title=(
             "NEW TRAIN (A-R, no augmentation)"
         ),
-        overall_accuracy=train_accuracy,
+        overall_accuracy=(
+            train_accuracy
+        ),
         per_class_accuracy=(
             train_class_accuracy
         ),
-        confusion=train_confusion,
+        confusion=(
+            train_confusion
+        ),
         classes=classes,
     )
 
@@ -859,39 +1073,43 @@ def main() -> None:
         title=(
             "NEW VALIDATION (S-V)"
         ),
-        overall_accuracy=val_accuracy,
+        overall_accuracy=(
+            val_accuracy
+        ),
         per_class_accuracy=(
             val_class_accuracy
         ),
-        confusion=val_confusion,
+        confusion=(
+            val_confusion
+        ),
         classes=classes,
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Session overview
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     print_session_results(
         session_results,
         classes,
     )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Detailed session confusion matrices
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
-    for session in VALIDATION_SESSIONS:
+    for session in (
+        VALIDATION_SESSIONS
+    ):
 
         result = session_results[
             session
         ]
 
-        title = (
-            f"SESSION {session}"
-        )
-
         print_results(
-            title=title,
+            title=(
+                f"SESSION {session}"
+            ),
             overall_accuracy=(
                 result["overall"]
             ),
@@ -904,9 +1122,9 @@ def main() -> None:
             classes=classes,
         )
 
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     # Train / validation comparison
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
 
     gap = (
         train_accuracy
@@ -935,6 +1153,27 @@ def main() -> None:
         f"Generalization gap: "
         f"{gap * 100:.2f} percentage points"
     )
+
+    if (
+        "new_val_accuracy"
+        in metrics
+    ):
+
+        saved_val = float(
+            metrics[
+                "new_val_accuracy"
+            ]
+        )
+
+        difference = (
+            val_accuracy
+            - saved_val
+        )
+
+        print(
+            f"Saved/recomputed difference: "
+            f"{difference * 100:+.4f} pp"
+        )
 
     print()
 

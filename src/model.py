@@ -21,29 +21,27 @@ EMBEDDING_DIM = 384
 
 EXPECTED_ATTENTION_BLOCKS = 12
 
+# V6:
+# Fine-tune only the last two transformer blocks.
+NUM_TRAINABLE_BLOCKS = 2
+
 
 class Opset13SelfAttention(nn.Module):
     """
     ONNX Opset-13-friendly replacement for DINOv2 attention.
 
-    It keeps the original pretrained modules:
+    Keeps the original pretrained:
 
         qkv
         proj
         proj_drop
 
-    and replaces only:
-
-        scaled_dot_product_attention(...)
-
-    with the mathematically equivalent classic formulation:
+    modules and replaces scaled_dot_product_attention()
+    with classic attention:
 
         scores = (Q @ K^T) * scale
         attention = softmax(scores)
         output = attention @ V
-
-    For hulk-hand the DINOv2 backbone is kept in eval mode,
-    so attention dropout is inactive during normal use.
     """
 
     def __init__(
@@ -95,20 +93,10 @@ class Opset13SelfAttention(nn.Module):
             source_attention.attn_drop
         )
 
-        # Reuse the exact pretrained modules.
-        #
-        # No weights are reinitialized here.
-        self.qkv = (
-            source_attention.qkv
-        )
-
-        self.proj = (
-            source_attention.proj
-        )
-
-        self.proj_drop = (
-            source_attention.proj_drop
-        )
+        # Reuse exact pretrained modules.
+        self.qkv = source_attention.qkv
+        self.proj = source_attention.proj
+        self.proj_drop = source_attention.proj_drop
 
         if (
             self.dim
@@ -143,11 +131,7 @@ class Opset13SelfAttention(nn.Module):
         )
 
         # ------------------------------------------------------
-        # QKV projection
-        #
-        # [B, N, C]
-        #   ->
-        # [B, N, 3, H, D]
+        # QKV
         # ------------------------------------------------------
 
         qkv = self.qkv(
@@ -162,18 +146,12 @@ class Opset13SelfAttention(nn.Module):
             head_dim,
         )
 
-        query, key, value = (
-            torch.unbind(
-                qkv,
-                dim=2,
-            )
+        query, key, value = torch.unbind(
+            qkv,
+            dim=2,
         )
 
-        # ------------------------------------------------------
-        # [B, N, H, D]
-        #   ->
-        # [B, H, N, D]
-        # ------------------------------------------------------
+        # [B, N, H, D] -> [B, H, N, D]
 
         query = query.transpose(
             1,
@@ -192,10 +170,6 @@ class Opset13SelfAttention(nn.Module):
 
         # ------------------------------------------------------
         # Classic scaled dot-product attention
-        #
-        # [B,H,N,D] @ [B,H,D,N]
-        #   ->
-        # [B,H,N,N]
         # ------------------------------------------------------
 
         attention_scores = (
@@ -209,9 +183,6 @@ class Opset13SelfAttention(nn.Module):
             * self.scale
         )
 
-        # DINOv2 does not use causal attention for this
-        # image-classification backbone, but preserve the
-        # argument for compatibility with the original API.
         if is_causal:
 
             causal_mask = torch.ones(
@@ -241,7 +212,6 @@ class Opset13SelfAttention(nn.Module):
             dim=-1,
         )
 
-        # Match the original attention-dropout behavior.
         if (
             self.training
             and self.attn_drop > 0.0
@@ -253,26 +223,10 @@ class Opset13SelfAttention(nn.Module):
                 training=True,
             )
 
-        # ------------------------------------------------------
-        # Attention @ V
-        #
-        # [B,H,N,N] @ [B,H,N,D]
-        #   ->
-        # [B,H,N,D]
-        # ------------------------------------------------------
-
         output = torch.matmul(
             attention,
             value,
         )
-
-        # ------------------------------------------------------
-        # [B,H,N,D]
-        #   ->
-        # [B,N,H,D]
-        #   ->
-        # [B,N,C]
-        # ------------------------------------------------------
 
         output = (
             output
@@ -303,8 +257,7 @@ def _is_dinov2_attention(
     module: nn.Module,
 ) -> bool:
     """
-    Identify the Attention / MemEffAttention modules
-    currently used inside the DINOv2 backbone.
+    Identify DINOv2 Attention / MemEffAttention modules.
     """
 
     class_name = (
@@ -331,8 +284,7 @@ def _is_dinov2_attention(
             module,
             name,
         )
-        for name
-        in required_attributes
+        for name in required_attributes
     )
 
 
@@ -340,9 +292,7 @@ def replace_attention_for_opset13(
     module: nn.Module,
 ) -> int:
     """
-    Recursively replace DINOv2 Attention modules.
-
-    Returns the number of replaced modules.
+    Recursively replace DINOv2 attention modules.
     """
 
     replaced = 0
@@ -355,10 +305,8 @@ def replace_attention_for_opset13(
             child_module
         ):
 
-            replacement = (
-                Opset13SelfAttention(
-                    child_module
-                )
+            replacement = Opset13SelfAttention(
+                child_module
             )
 
             setattr(
@@ -371,10 +319,8 @@ def replace_attention_for_opset13(
 
         else:
 
-            replaced += (
-                replace_attention_for_opset13(
-                    child_module
-                )
+            replaced += replace_attention_for_opset13(
+                child_module
             )
 
     return replaced
@@ -382,7 +328,7 @@ def replace_attention_for_opset13(
 
 class HulkHandDinoV2(nn.Module):
     """
-    hulk-hand V5 model.
+    hulk-hand V6 model.
 
     Architecture:
 
@@ -390,20 +336,25 @@ class HulkHandDinoV2(nn.Module):
                |
                v
         DINOv2 ViT-S/14
-        frozen backbone
+               |
+        blocks 0-9
+        FROZEN
+               |
+        blocks 10-11
+        TRAINABLE
+               |
+        final LayerNorm
+        TRAINABLE
                |
                v
         384-D CLS embedding
                |
                v
         Linear(384, num_classes)
+        TRAINABLE
                |
                v
              logits
-
-    The DINOv2 attention implementation is replaced by
-    Opset13SelfAttention so that the model does not use
-    aten::scaled_dot_product_attention.
     """
 
     def __init__(
@@ -427,37 +378,37 @@ class HulkHandDinoV2(nn.Module):
             EMBEDDING_DIM
         )
 
+        self.num_trainable_blocks = (
+            NUM_TRAINABLE_BLOCKS
+        )
+
         # ------------------------------------------------------
         # Load official pretrained DINOv2 ViT-S/14
         # ------------------------------------------------------
 
-        self.backbone = (
-            torch.hub.load(
-                DINOV2_REPO,
-                DINOV2_MODEL,
-                pretrained=pretrained,
-            )
+        self.backbone = torch.hub.load(
+            DINOV2_REPO,
+            DINOV2_MODEL,
+            pretrained=pretrained,
         )
 
         # ------------------------------------------------------
-        # Replace all DINOv2 attention modules
+        # Replace attention for Opset 13
         # ------------------------------------------------------
 
-        replaced = (
-            replace_attention_for_opset13(
-                self.backbone
-            )
+        replaced = replace_attention_for_opset13(
+            self.backbone
         )
 
         if (
             replaced
             != EXPECTED_ATTENTION_BLOCKS
         ):
+
             raise RuntimeError(
                 "Unexpected number of DINOv2 "
                 "attention modules replaced.\n"
-                f"Expected: "
-                f"{EXPECTED_ATTENTION_BLOCKS}\n"
+                f"Expected: {EXPECTED_ATTENTION_BLOCKS}\n"
                 f"Actual:   {replaced}"
             )
 
@@ -466,7 +417,37 @@ class HulkHandDinoV2(nn.Module):
         )
 
         # ------------------------------------------------------
-        # Freeze entire pretrained backbone
+        # Validate transformer structure
+        # ------------------------------------------------------
+
+        if not hasattr(
+            self.backbone,
+            "blocks",
+        ):
+            raise RuntimeError(
+                "DINOv2 backbone has no 'blocks' attribute."
+            )
+
+        if len(
+            self.backbone.blocks
+        ) != EXPECTED_ATTENTION_BLOCKS:
+
+            raise RuntimeError(
+                "Unexpected number of transformer blocks.\n"
+                f"Expected: {EXPECTED_ATTENTION_BLOCKS}\n"
+                f"Actual:   {len(self.backbone.blocks)}"
+            )
+
+        if not hasattr(
+            self.backbone,
+            "norm",
+        ):
+            raise RuntimeError(
+                "DINOv2 backbone has no final 'norm'."
+            )
+
+        # ------------------------------------------------------
+        # Freeze complete backbone first
         # ------------------------------------------------------
 
         for parameter in (
@@ -474,10 +455,48 @@ class HulkHandDinoV2(nn.Module):
         ):
             parameter.requires_grad = False
 
-        self.backbone.eval()
+        # ------------------------------------------------------
+        # Unfreeze last transformer blocks
+        # ------------------------------------------------------
+
+        first_trainable_block = (
+            len(self.backbone.blocks)
+            - NUM_TRAINABLE_BLOCKS
+        )
+
+        self.trainable_block_indices = tuple(
+            range(
+                first_trainable_block,
+                len(self.backbone.blocks),
+            )
+        )
+
+        for block_index in (
+            self.trainable_block_indices
+        ):
+
+            block = (
+                self.backbone.blocks[
+                    block_index
+                ]
+            )
+
+            for parameter in (
+                block.parameters()
+            ):
+                parameter.requires_grad = True
 
         # ------------------------------------------------------
-        # New trainable classifier
+        # Unfreeze final LayerNorm
+        # ------------------------------------------------------
+
+        for parameter in (
+            self.backbone.norm.parameters()
+        ):
+            parameter.requires_grad = True
+
+        # ------------------------------------------------------
+        # New classifier
         # ------------------------------------------------------
 
         self.classifier = nn.Linear(
@@ -486,6 +505,12 @@ class HulkHandDinoV2(nn.Module):
         )
 
         self._initialize_classifier()
+
+        # ------------------------------------------------------
+        # Set initial module modes
+        # ------------------------------------------------------
+
+        self.eval()
 
     def _initialize_classifier(
         self,
@@ -509,15 +534,46 @@ class HulkHandDinoV2(nn.Module):
         self,
         mode: bool = True,
     ):
+        """
+        Selective training mode.
 
-        # Set the overall model mode.
+        Frozen backbone parts remain in eval mode.
+
+        During training only:
+
+            blocks 10-11
+            final backbone norm
+            classifier
+
+        are put into training mode.
+        """
+
         super().train(
             mode
         )
 
-        # But keep pretrained frozen DINOv2
-        # permanently in evaluation mode.
+        # Entire backbone starts in eval mode.
         self.backbone.eval()
+
+        if mode:
+
+            for block_index in (
+                self.trainable_block_indices
+            ):
+
+                self.backbone.blocks[
+                    block_index
+                ].train(
+                    True
+                )
+
+            self.backbone.norm.train(
+                True
+            )
+
+            self.classifier.train(
+                True
+            )
 
         return self
 
@@ -568,14 +624,12 @@ def count_parameters(
 
     total = sum(
         parameter.numel()
-        for parameter
-        in model.parameters()
+        for parameter in model.parameters()
     )
 
     trainable = sum(
         parameter.numel()
-        for parameter
-        in model.parameters()
+        for parameter in model.parameters()
         if parameter.requires_grad
     )
 
@@ -591,13 +645,122 @@ def count_parameters(
     )
 
 
+def validate_trainable_parameters(
+    model: HulkHandDinoV2,
+) -> None:
+    """
+    Ensure only the intended V6 parts are trainable.
+    """
+
+    allowed_prefixes = (
+        "backbone.blocks.10.",
+        "backbone.blocks.11.",
+        "backbone.norm.",
+        "classifier.",
+    )
+
+    unexpected_trainable = []
+
+    for name, parameter in (
+        model.named_parameters()
+    ):
+
+        if not parameter.requires_grad:
+            continue
+
+        if not name.startswith(
+            allowed_prefixes
+        ):
+            unexpected_trainable.append(
+                name
+            )
+
+    if unexpected_trainable:
+
+        raise RuntimeError(
+            "Unexpected trainable parameters:\n"
+            + "\n".join(
+                unexpected_trainable
+            )
+        )
+
+    for block_index in range(
+        0,
+        10,
+    ):
+
+        block = (
+            model.backbone.blocks[
+                block_index
+            ]
+        )
+
+        trainable = [
+            name
+            for name, parameter
+            in block.named_parameters()
+            if parameter.requires_grad
+        ]
+
+        if trainable:
+
+            raise RuntimeError(
+                f"Frozen block {block_index} "
+                "contains trainable parameters:\n"
+                + "\n".join(
+                    trainable
+                )
+            )
+
+    for block_index in (
+        model.trainable_block_indices
+    ):
+
+        block = (
+            model.backbone.blocks[
+                block_index
+            ]
+        )
+
+        if not any(
+            parameter.requires_grad
+            for parameter in block.parameters()
+        ):
+
+            raise RuntimeError(
+                f"Block {block_index} "
+                "contains no trainable parameters."
+            )
+
+    if not any(
+        parameter.requires_grad
+        for parameter in (
+            model.backbone.norm.parameters()
+        )
+    ):
+
+        raise RuntimeError(
+            "Final backbone norm is not trainable."
+        )
+
+    if not any(
+        parameter.requires_grad
+        for parameter in (
+            model.classifier.parameters()
+        )
+    ):
+
+        raise RuntimeError(
+            "Classifier is not trainable."
+        )
+
+
 def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Build and smoke-test the "
-            "Opset-13-compatible hulk-hand "
-            "DINOv2 ViT-S/14 model."
+            "Build and smoke-test the hulk-hand "
+            "DINOv2 ViT-S/14 V6 model."
         )
     )
 
@@ -628,6 +791,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.num_classes <= 0:
+
         raise ValueError(
             "--num-classes must be > 0."
         )
@@ -647,6 +811,7 @@ def main() -> None:
     elif args.device == "cuda":
 
         if not torch.cuda.is_available():
+
             raise RuntimeError(
                 "CUDA requested but unavailable."
             )
@@ -667,10 +832,10 @@ def main() -> None:
 
     print()
     print(
-        "hulk-hand DINOv2 Opset-13 model"
+        "hulk-hand DINOv2 V6 model"
     )
     print(
-        "================================"
+        "========================="
     )
     print()
 
@@ -707,12 +872,18 @@ def main() -> None:
     )
 
     print(
-        "xFormers:         disabled"
+        "Attention:        "
+        "Opset13 classic"
     )
 
     print(
-        "Attention:        "
-        "Opset13 classic"
+        "Trainable blocks: "
+        "10, 11"
+    )
+
+    print(
+        "Final norm:       "
+        "trainable"
     )
 
     print()
@@ -724,6 +895,7 @@ def main() -> None:
     print(
         "Loading pretrained DINOv2 backbone..."
     )
+
     print()
 
     model = build_model(
@@ -735,54 +907,9 @@ def main() -> None:
         device
     )
 
-    model.eval()
-
-    # ----------------------------------------------------------
-    # Verify attention replacement
-    # ----------------------------------------------------------
-
-    remaining_original_attention = [
-        name
-        for name, module
-        in model.backbone.named_modules()
-        if _is_dinov2_attention(
-            module
-        )
-    ]
-
-    if remaining_original_attention:
-
-        raise RuntimeError(
-            "Original DINOv2 attention modules "
-            "remain after replacement:\n"
-            + "\n".join(
-                remaining_original_attention
-            )
-        )
-
-    opset_attention_modules = [
-        name
-        for name, module
-        in model.backbone.named_modules()
-        if isinstance(
-            module,
-            Opset13SelfAttention,
-        )
-    ]
-
-    if (
-        len(opset_attention_modules)
-        != EXPECTED_ATTENTION_BLOCKS
-    ):
-
-        raise RuntimeError(
-            "Incorrect number of Opset13 "
-            "attention modules.\n"
-            f"Expected: "
-            f"{EXPECTED_ATTENTION_BLOCKS}\n"
-            f"Actual:   "
-            f"{len(opset_attention_modules)}"
-        )
+    validate_trainable_parameters(
+        model
+    )
 
     # ----------------------------------------------------------
     # Parameter counts
@@ -802,6 +929,11 @@ def main() -> None:
     )
 
     print(
+        f"Trainable block indices:    "
+        f"{model.trainable_block_indices}"
+    )
+
+    print(
         f"Total parameters:           "
         f"{total_parameters:,}"
     )
@@ -817,42 +949,56 @@ def main() -> None:
     )
 
     # ----------------------------------------------------------
-    # Verify frozen backbone
+    # Verify train/eval behavior
     # ----------------------------------------------------------
 
-    backbone_trainable = [
-        name
-        for name, parameter
-        in model.backbone.named_parameters()
-        if parameter.requires_grad
-    ]
+    model.train()
 
-    if backbone_trainable:
+    for block_index in range(
+        10
+    ):
 
-        raise RuntimeError(
-            "Backbone contains trainable "
-            "parameters:\n"
-            + "\n".join(
-                backbone_trainable
+        if (
+            model.backbone.blocks[
+                block_index
+            ].training
+        ):
+
+            raise RuntimeError(
+                f"Frozen block {block_index} "
+                "entered training mode."
             )
-        )
 
-    classifier_trainable = [
-        name
-        for name, parameter
-        in model.classifier.named_parameters()
-        if parameter.requires_grad
-    ]
+    for block_index in (
+        model.trainable_block_indices
+    ):
 
-    if not classifier_trainable:
+        if not (
+            model.backbone.blocks[
+                block_index
+            ].training
+        ):
+
+            raise RuntimeError(
+                f"Trainable block {block_index} "
+                "did not enter training mode."
+            )
+
+    if not model.backbone.norm.training:
 
         raise RuntimeError(
-            "Classifier contains no "
-            "trainable parameters."
+            "Final backbone norm did not "
+            "enter training mode."
+        )
+
+    if not model.classifier.training:
+
+        raise RuntimeError(
+            "Classifier did not enter training mode."
         )
 
     # ----------------------------------------------------------
-    # Forward smoke test
+    # Forward + backward smoke test
     # ----------------------------------------------------------
 
     dummy_input = torch.randn(
@@ -864,32 +1010,9 @@ def main() -> None:
         dtype=torch.float32,
     )
 
-    with torch.inference_mode():
-
-        outputs = model(
-            dummy_input
-        )
-
-    if not isinstance(
-        outputs,
-        dict,
-    ):
-
-        raise RuntimeError(
-            "Model output must be a dict."
-        )
-
-    if set(
-        outputs.keys()
-    ) != {
-        "logits",
-        "embedding",
-    }:
-
-        raise RuntimeError(
-            "Unexpected model outputs: "
-            f"{sorted(outputs.keys())}"
-        )
+    outputs = model(
+        dummy_input
+    )
 
     logits = outputs[
         "logits"
@@ -916,10 +1039,8 @@ def main() -> None:
 
         raise RuntimeError(
             "Unexpected logits shape.\n"
-            f"Expected: "
-            f"{expected_logits_shape}\n"
-            f"Actual:   "
-            f"{tuple(logits.shape)}"
+            f"Expected: {expected_logits_shape}\n"
+            f"Actual:   {tuple(logits.shape)}"
         )
 
     if (
@@ -929,10 +1050,8 @@ def main() -> None:
 
         raise RuntimeError(
             "Unexpected embedding shape.\n"
-            f"Expected: "
-            f"{expected_embedding_shape}\n"
-            f"Actual:   "
-            f"{tuple(embedding.shape)}"
+            f"Expected: {expected_embedding_shape}\n"
+            f"Actual:   {tuple(embedding.shape)}"
         )
 
     if not torch.isfinite(
@@ -951,11 +1070,72 @@ def main() -> None:
             "Non-finite embedding detected."
         )
 
+    # Artificial loss only to verify gradients.
+    loss = logits.sum()
+
+    loss.backward()
+
+    # ----------------------------------------------------------
+    # Verify gradient routing
+    # ----------------------------------------------------------
+
+    trainable_without_gradient = []
+
+    frozen_with_gradient = []
+
+    for name, parameter in (
+        model.named_parameters()
+    ):
+
+        if parameter.requires_grad:
+
+            if parameter.grad is None:
+
+                trainable_without_gradient.append(
+                    name
+                )
+
+            elif not torch.isfinite(
+                parameter.grad
+            ).all():
+
+                raise FloatingPointError(
+                    "Non-finite gradient detected in "
+                    f"'{name}'."
+                )
+
+        else:
+
+            if parameter.grad is not None:
+
+                frozen_with_gradient.append(
+                    name
+                )
+
+    if trainable_without_gradient:
+
+        raise RuntimeError(
+            "Trainable parameters without gradients:\n"
+            + "\n".join(
+                trainable_without_gradient
+            )
+        )
+
+    if frozen_with_gradient:
+
+        raise RuntimeError(
+            "Frozen parameters received gradients:\n"
+            + "\n".join(
+                frozen_with_gradient
+            )
+        )
+
     # ----------------------------------------------------------
     # Result
     # ----------------------------------------------------------
 
     print()
+
     print(
         f"Input shape:      "
         f"{tuple(dummy_input.shape)}"
@@ -981,16 +1161,28 @@ def main() -> None:
         f"{bool(torch.isfinite(embedding).all())}"
     )
 
+    print(
+        "Backward:         PASS"
+    )
+
+    print(
+        "Frozen gradients: PASS"
+    )
+
     print()
+
     print(
         "========================"
     )
+
     print(
         "MODEL SMOKE TEST PASSED"
     )
+
     print(
         "========================"
     )
+
     print()
 
 
