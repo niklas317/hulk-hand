@@ -39,14 +39,14 @@ from sampler import (
 # Training configuration
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "dinov2_vits14_v9_layerwise_decay_last8_opset13"
+MODEL_ID = "dinov2_vits14_v11_layerwise_decay_last10_opset13"
 
 MAX_EPOCHS = 40
 
 WARMUP_EPOCHS = 3
 WARMUP_START_FACTOR = 0.10
 
-BACKBONE_LR = 5e-6
+BACKBONE_LR = 2.5e-6
 BACKBONE_LR_DECAY = 0.85
 CLASSIFIER_LR = 2e-4
 
@@ -56,7 +56,7 @@ LABEL_SMOOTHING = 0.05
 
 GRADIENT_CLIP_NORM = 1.0
 
-EARLY_STOPPING_PATIENCE = 8
+EARLY_STOPPING_PATIENCE = 4
 
 VALIDATION_BATCH_SIZE = 32
 
@@ -757,7 +757,7 @@ def build_checkpoint(
             "precision": PRECISION,
 
             "training_mode": (
-                "last_8_blocks_layerwise_decay"
+                "last_10_blocks_layerwise_decay"
             ),
 
             "num_trainable_blocks": len(
@@ -1021,7 +1021,7 @@ def validate_resume_checkpoint(
     if (
         saved_mode is not None
         and saved_mode
-        != "last_8_blocks_layerwise_decay"
+        != "last_10_blocks_layerwise_decay"
     ):
 
         raise RuntimeError(
@@ -1097,7 +1097,7 @@ def print_training_header(
 
     print()
     print(
-        "hulk-hand DINOv2 V9 training"
+        "hulk-hand DINOv2 V11 training"
     )
     print(
         "============================"
@@ -1136,7 +1136,7 @@ def print_training_header(
 
     print(
         "Training mode:       "
-        "layerwise decay on last 8 blocks + norm"
+        "layerwise decay on last 10 blocks + norm"
     )
 
     print(
@@ -1284,8 +1284,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "V9 layerwise-decay fine-tuning of the "
-            "last eight DINOv2 ViT-S/14 transformer "
+            "V11 layerwise-decay fine-tuning of the "
+            "last ten DINOv2 ViT-S/14 transformer "
             "blocks for hulk-hand."
         )
     )
@@ -1313,7 +1313,7 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Resume training from a V9 last.pt."
+            "Resume training from a V11 last.pt."
         ),
     )
 

@@ -21,9 +21,9 @@ EMBEDDING_DIM = 384
 
 EXPECTED_ATTENTION_BLOCKS = 12
 
-# V9:
-# Fine-tune the last eight transformer blocks.
-NUM_TRAINABLE_BLOCKS = 8
+# V11:
+# Fine-tune the last ten transformer blocks.
+NUM_TRAINABLE_BLOCKS = 10
 
 
 class Opset13SelfAttention(nn.Module):
@@ -328,7 +328,7 @@ def replace_attention_for_opset13(
 
 class HulkHandDinoV2(nn.Module):
     """
-    hulk-hand V9 model.
+    hulk-hand V11 model.
 
     Architecture:
 
@@ -337,10 +337,10 @@ class HulkHandDinoV2(nn.Module):
                v
         DINOv2 ViT-S/14
                |
-        blocks 0-3
+        blocks 0-1
         FROZEN
                |
-        blocks 4-11
+        blocks 2-11
         TRAINABLE
                |
         final LayerNorm
@@ -662,7 +662,7 @@ def validate_trainable_parameters(
     model: HulkHandDinoV2,
 ) -> None:
     """
-    Ensure only the intended V9 parts are trainable.
+    Ensure only the intended V11 parts are trainable.
     """
 
     allowed_prefixes = tuple(
@@ -776,7 +776,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Build and smoke-test the hulk-hand "
-            "DINOv2 ViT-S/14 V9 model."
+            "DINOv2 ViT-S/14 V11 model."
         )
     )
 
@@ -848,7 +848,7 @@ def main() -> None:
 
     print()
     print(
-        "hulk-hand DINOv2 V9 model"
+        "hulk-hand DINOv2 V11 model"
     )
     print(
         "========================="

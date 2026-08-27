@@ -46,27 +46,27 @@ The current active architecture is:
 DINOv2 ViT-S/14
 ```
 
-with the last eight transformer blocks fine-tuned.
+with the last ten transformer blocks fine-tuned.
 
 The best model observed so far is:
 
 ```text
-Experiment          V9
+Experiment          V10
 Backbone            DINOv2 ViT-S/14
-Best epoch          21
-NEW val accuracy    85.80%
-NEW val loss         0.5539
-Train accuracy      94.70%
-OLD val accuracy    93.46%
+Best epoch          30
+NEW val accuracy    86.87%
+NEW val loss         0.5248
+Train accuracy      96.90%
+OLD val accuracy    94.23%
 ```
 
 Diagnostic evaluation of that checkpoint produced:
 
 ```text
-NEW train accuracy  94.70%
-NEW val accuracy    85.80%
+NEW train accuracy  96.90%
+NEW val accuracy    86.87%
 
-Generalization gap  8.90 percentage points
+Generalization gap  10.03 percentage points
 ```
 
 Validation by unseen session:
@@ -78,7 +78,7 @@ U    73.40%
 V    89.20%
 ```
 
-The current main limitation is therefore still **cross-session generalization**, although V9 improved the gap substantially.
+The current main limitation is therefore still **cross-session generalization**, although V10 improved the NEW validation score further.
 
 The final NEW test sessions:
 
@@ -190,32 +190,34 @@ and checks the model with ONNX Runtime.
 
 ## 4. Start the current training experiment
 
-Current V9 example:
+Current V11 example:
 
 ```bash
 python src/train.py \
     --data-dir /path/to/Dataset \
-    --output-dir checkpoints/training/v9 \
+    --output-dir checkpoints/training/v11 \
     --horizontal-flip
 ```
+
+V11 uses the last ten blocks, a lower backbone LR than V10, blur threshold 222, contrast threshold 35, other thresholds at default, trains for 30 epochs, and uses early stopping patience 4.
 
 A fresh DINOv2 run does **not** require a HaGRID checkpoint.
 
 The pretrained DINOv2 backbone is loaded through `torch.hub`.
 
-## 5. Resume an interrupted V9 run
+## 5. Resume an interrupted V11 run
 
 ```bash
 python src/train.py \
     --data-dir /path/to/Dataset \
-    --output-dir checkpoints/training/v9 \
-    --resume checkpoints/training/v9/last.pt \
+    --output-dir checkpoints/training/v11 \
+    --resume checkpoints/training/v11/last.pt \
     --horizontal-flip
 ```
 
 Resume must only be used to continue the same experiment.
 
-Do not resume V6 when starting V9 or another independent experiment.
+Do not resume V6 when starting V11 or another independent experiment.
 
 ## 6. Diagnose the current best V6 checkpoint
 
@@ -2262,7 +2264,8 @@ V6 remains the best observed checkpoint.
 | V5 | DINOv2 ViT-S/14 | Frozen linear probe | 55.30% |
 | V6 | DINOv2 ViT-S/14 | Fine-tune final 2 blocks | **78.95%** |
 | V7 | DINOv2 ViT-S/14 | Lower LR + stronger regularization | 76.95%* |
-| V9 | DINOv2 ViT-S/14 | Fine-tune last 8 blocks + layerwise decay | **85.80%** |
+| V9 | DINOv2 ViT-S/14 | Fine-tune last 8 blocks + layerwise decay | 85.80% |
+| V10 | DINOv2 ViT-S/14 | V9 setup on enhanced dataset | **86.87%** |
 
 `*` Best value observed through epoch 12.
 
