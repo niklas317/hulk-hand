@@ -80,6 +80,18 @@ V    89.20%
 
 The current main limitation is therefore still **cross-session generalization**, although V10 improved the NEW validation score further.
 
+V11 was run on the enhanced dataset with the last ten blocks trainable, but it did not surpass V10:
+
+```text
+Epoch               27
+Train accuracy      96.01%
+OLD val accuracy    92.85%
+NEW val accuracy    86.67%
+NEW val loss        0.5235
+```
+
+It remains useful as the current training configuration, but V10 is still the best observed checkpoint.
+
 The final NEW test sessions:
 
 ```text
@@ -2266,6 +2278,7 @@ V6 remains the best observed checkpoint.
 | V7 | DINOv2 ViT-S/14 | Lower LR + stronger regularization | 76.95%* |
 | V9 | DINOv2 ViT-S/14 | Fine-tune last 8 blocks + layerwise decay | 85.80% |
 | V10 | DINOv2 ViT-S/14 | V9 setup on enhanced dataset | **86.87%** |
+| V11 | DINOv2 ViT-S/14 | Last 10 blocks + lower LR | 86.67% |
 
 `*` Best value observed through epoch 12.
 

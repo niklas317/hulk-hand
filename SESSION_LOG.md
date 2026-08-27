@@ -34,3 +34,24 @@
   - LR classifier: 0.00004054
   - Early stopping triggered at 8/8
 - Checkpoints: to be added manually later
+
+## 2026-08-27 - V11
+
+- Dataset: enhanced V10 dataset
+- Backbone: DINOv2 ViT-S/14
+- Training setup: last 10 transformer blocks fine-tuned, layerwise LR decay
+- Preprocessing: blur threshold 222, contrast threshold 35, other thresholds default
+- Training length: 30 epochs
+- Early stopping: patience 4
+- Outcome:
+  - Epoch 27/40
+  - Train loss: 0.3068
+  - Train accuracy: 96.01%
+  - OLD val loss: 0.3612
+  - OLD val accuracy: 92.85%
+  - NEW val loss: 0.5235
+  - NEW val accuracy: 86.67%
+  - LR backbone: 0.00000018..0.00000078
+  - LR classifier: 0.00006271
+  - Early stopping triggered at 4/4
+- Checkpoints: to be added manually later
