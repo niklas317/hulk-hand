@@ -11,7 +11,7 @@ from torch.utils.data import ConcatDataset, Sampler
 from dataset import GestureDataset
 
 
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 
 OLD_SAMPLES_PER_BATCH = 32
 NEW_SAMPLES_PER_BATCH = 96
