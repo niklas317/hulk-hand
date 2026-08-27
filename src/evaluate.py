@@ -15,7 +15,7 @@ from dataset import (
     collect_new_samples,
     discover_classes,
 )
-from model import HulkHandResNet18
+from model import HulkHandDinoV2, build_model
 
 
 BATCH_SIZE = 128
@@ -163,7 +163,7 @@ def build_test_dataset(
 
 @torch.inference_mode()
 def evaluate(
-    model: HulkHandResNet18,
+    model: HulkHandDinoV2,
     loader: DataLoader,
     device: torch.device,
     num_classes: int,
@@ -476,8 +476,9 @@ def main() -> None:
         )
     )
 
-    model = HulkHandResNet18(
-        num_classes=len(classes)
+    model = build_model(
+        num_classes=len(classes),
+        pretrained=False,
     )
 
     model.load_state_dict(

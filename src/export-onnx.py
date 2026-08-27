@@ -25,7 +25,7 @@ except ImportError as exc:
         "Install it with: pip install onnxruntime"
     ) from exc
 
-from model import HulkHandResNet18
+from model import HulkHandDinoV2, build_model
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ INPUT_SHAPE = (
     224,
 )
 
-EMBEDDING_DIM = 512
+EMBEDDING_DIM = 384
 
 RTOL = 1e-4
 ATOL = 1e-5
@@ -63,7 +63,7 @@ class ONNXExportWrapper(nn.Module):
 
     def __init__(
         self,
-        model: HulkHandResNet18,
+        model: HulkHandDinoV2,
     ) -> None:
         super().__init__()
 
@@ -168,8 +168,9 @@ def build_export_model(
         checkpoint["num_classes"]
     )
 
-    model = HulkHandResNet18(
-        num_classes=num_classes
+    model = build_model(
+        num_classes=num_classes,
+        pretrained=False,
     )
 
     model.load_state_dict(

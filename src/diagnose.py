@@ -23,7 +23,7 @@ from model import (
 )
 
 
-EXPECTED_MODEL_ID = "dinov2_vits14_v6_last2_opset13"
+EXPECTED_MODEL_ID = "dinov2_vits14_v9_layerwise_decay_last8_opset13"
 
 VALIDATION_SESSIONS = (
     "S",
@@ -601,7 +601,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Diagnose the DINOv2 V6 best.pt "
+            "Diagnose the DINOv2 V9 best.pt "
             "on NEW train A-R and NEW validation S-V."
         )
     )
@@ -620,7 +620,7 @@ def main() -> None:
         type=Path,
         required=True,
         help=(
-            "Path to the V6 best.pt."
+            "Path to the V9 best.pt."
         ),
     )
 
@@ -839,7 +839,7 @@ def main() -> None:
 
     print()
     print(
-        "Building DINOv2 V6 architecture..."
+        "Building DINOv2 V9 architecture..."
     )
     print()
 
@@ -867,7 +867,7 @@ def main() -> None:
 
     print()
     print(
-        "hulk-hand DINOv2 V6 diagnosis"
+        "hulk-hand DINOv2 V9 diagnosis"
     )
     print(
         "============================="
