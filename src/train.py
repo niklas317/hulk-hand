@@ -39,21 +39,24 @@ from sampler import (
 # Training configuration
 # ---------------------------------------------------------------------------
 
-MODEL_ID = "dinov2_vits14_v7_regularized_last2_opset13"
+MODEL_ID = "dinov2_vits14_v9_layerwise_decay_last8_opset13"
 
-MAX_EPOCHS = 30
+MAX_EPOCHS = 40
 
 WARMUP_EPOCHS = 3
 WARMUP_START_FACTOR = 0.10
 
 BACKBONE_LR = 5e-6
-CLASSIFIER_LR = 1e-4
+BACKBONE_LR_DECAY = 0.85
+CLASSIFIER_LR = 2e-4
 
-WEIGHT_DECAY = 1e-3
+WEIGHT_DECAY = 1e-4
+
+LABEL_SMOOTHING = 0.05
 
 GRADIENT_CLIP_NORM = 1.0
 
-EARLY_STOPPING_PATIENCE = 6
+EARLY_STOPPING_PATIENCE = 8
 
 VALIDATION_BATCH_SIZE = 128
 
@@ -95,23 +98,63 @@ def build_optimizer(
     model: HulkHandDinoV2,
 ) -> AdamW:
 
-    backbone_parameters = []
+    parameter_groups = []
 
-    for block_index in model.trainable_block_indices:
+    trainable_block_indices = list(
+        model.trainable_block_indices
+    )
 
-        backbone_parameters.extend(
+    if not trainable_block_indices:
+        raise RuntimeError(
+            "No trainable DINOv2 blocks found."
+        )
+
+    last_block_position = len(
+        trainable_block_indices
+    ) - 1
+
+    for position, block_index in enumerate(
+        trainable_block_indices
+    ):
+
+        block_parameters = [
             parameter
             for parameter in model.backbone.blocks[
                 block_index
             ].parameters()
             if parameter.requires_grad
+        ]
+
+        if not block_parameters:
+            continue
+
+        lr = BACKBONE_LR * (
+            BACKBONE_LR_DECAY
+            ** (last_block_position - position)
         )
 
-    backbone_parameters.extend(
+        parameter_groups.append(
+            {
+                "params": block_parameters,
+                "lr": lr,
+                "name": f"backbone_block_{block_index}",
+            }
+        )
+
+    norm_parameters = [
         parameter
         for parameter in model.backbone.norm.parameters()
         if parameter.requires_grad
-    )
+    ]
+
+    if norm_parameters:
+        parameter_groups.append(
+            {
+                "params": norm_parameters,
+                "lr": BACKBONE_LR,
+                "name": "backbone_norm",
+            }
+        )
 
     classifier_parameters = [
         parameter
@@ -119,9 +162,9 @@ def build_optimizer(
         if parameter.requires_grad
     ]
 
-    if not backbone_parameters:
+    if not parameter_groups:
         raise RuntimeError(
-            "No trainable DINOv2 backbone parameters found."
+            "No trainable DINOv2 parameters found."
         )
 
     if not classifier_parameters:
@@ -129,19 +172,16 @@ def build_optimizer(
             "No trainable classifier parameters found."
         )
 
+    parameter_groups.append(
+        {
+            "params": classifier_parameters,
+            "lr": CLASSIFIER_LR,
+            "name": "classifier",
+        }
+    )
+
     return AdamW(
-        [
-            {
-                "params": backbone_parameters,
-                "lr": BACKBONE_LR,
-                "name": "backbone",
-            },
-            {
-                "params": classifier_parameters,
-                "lr": CLASSIFIER_LR,
-                "name": "classifier",
-            },
-        ],
+        parameter_groups,
         weight_decay=WEIGHT_DECAY,
     )
 
@@ -280,8 +320,7 @@ def train_one_epoch(
     model.train()
 
     for block_index in range(
-        len(model.backbone.blocks)
-        - NUM_TRAINABLE_BLOCKS
+        model.trainable_block_indices[0]
     ):
 
         if model.backbone.blocks[
@@ -718,7 +757,11 @@ def build_checkpoint(
             "precision": PRECISION,
 
             "training_mode": (
-                "last_2_blocks_regularized"
+                "last_8_blocks_layerwise_decay"
+            ),
+
+            "num_trainable_blocks": len(
+                model.trainable_block_indices
             ),
 
             "trainable_blocks": list(
@@ -728,7 +771,9 @@ def build_checkpoint(
             "final_norm_trainable": True,
 
             "backbone_lr": BACKBONE_LR,
+            "backbone_lr_decay": BACKBONE_LR_DECAY,
             "classifier_lr": CLASSIFIER_LR,
+            "label_smoothing": LABEL_SMOOTHING,
 
             "optimizer": "adamw",
             "weight_decay": WEIGHT_DECAY,
@@ -893,6 +938,7 @@ def validate_resume_checkpoint(
     checkpoint: dict[str, Any],
     classes: list[str],
     class_to_idx: dict[str, int],
+    num_trainable_blocks: int,
 ) -> None:
 
     saved_model_id = checkpoint.get(
@@ -975,12 +1021,26 @@ def validate_resume_checkpoint(
     if (
         saved_mode is not None
         and saved_mode
-        != "last_2_blocks_regularized"
+        != "last_8_blocks_layerwise_decay"
     ):
 
         raise RuntimeError(
             "Resume checkpoint was created "
             "with a different training mode."
+        )
+
+    saved_trainable_blocks = training_config.get(
+        "num_trainable_blocks"
+    )
+
+    if (
+        saved_trainable_blocks is not None
+        and int(saved_trainable_blocks)
+        != num_trainable_blocks
+    ):
+
+        raise RuntimeError(
+            "Resume checkpoint was created with a different number of trainable blocks."
         )
 
 
@@ -1037,7 +1097,7 @@ def print_training_header(
 
     print()
     print(
-        "hulk-hand DINOv2 V7 training"
+        "hulk-hand DINOv2 V9 training"
     )
     print(
         "============================"
@@ -1076,7 +1136,7 @@ def print_training_header(
 
     print(
         "Training mode:       "
-        "regularized last 2 blocks + norm"
+        "layerwise decay on last 8 blocks + norm"
     )
 
     print(
@@ -1224,8 +1284,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "V7 regularized fine-tuning of the "
-            "last two DINOv2 ViT-S/14 transformer "
+            "V9 layerwise-decay fine-tuning of the "
+            "last eight DINOv2 ViT-S/14 transformer "
             "blocks for hulk-hand."
         )
     )
@@ -1253,7 +1313,7 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Resume training from a V7 last.pt."
+            "Resume training from a V9 last.pt."
         ),
     )
 
@@ -1443,6 +1503,7 @@ def main() -> None:
             resume_checkpoint,
             classes,
             class_to_idx,
+            NUM_TRAINABLE_BLOCKS,
         )
 
     # ------------------------------------------------------------------
@@ -1461,6 +1522,7 @@ def main() -> None:
         model = build_model(
             num_classes=len(classes),
             pretrained=True,
+            num_trainable_blocks=NUM_TRAINABLE_BLOCKS,
         )
 
     else:
@@ -1468,6 +1530,7 @@ def main() -> None:
         model = build_model(
             num_classes=len(classes),
             pretrained=False,
+            num_trainable_blocks=NUM_TRAINABLE_BLOCKS,
         )
 
     validate_trainable_parameters(
@@ -1490,8 +1553,8 @@ def main() -> None:
         optimizer
     )
 
-    criterion = (
-        nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=LABEL_SMOOTHING,
     )
 
     start_epoch = 1
@@ -1623,16 +1686,27 @@ def main() -> None:
             )
         )
 
-        current_backbone_lr = (
-            optimizer.param_groups[
-                0
-            ]["lr"]
+        backbone_lrs = [
+            group["lr"]
+            for group in optimizer.param_groups
+            if str(group.get("name", "")).startswith(
+                "backbone_block_"
+            )
+            or group.get("name") == "backbone_norm"
+        ]
+
+        current_backbone_lr_min = min(
+            backbone_lrs
         )
 
-        current_classifier_lr = (
-            optimizer.param_groups[
-                1
-            ]["lr"]
+        current_backbone_lr_max = max(
+            backbone_lrs
+        )
+
+        current_classifier_lr = next(
+            group["lr"]
+            for group in optimizer.param_groups
+            if group.get("name") == "classifier"
         )
 
         # --------------------------------------------------------------
@@ -1747,7 +1821,8 @@ def main() -> None:
 
         print(
             f"  LR backbone:      "
-            f"{current_backbone_lr:.8f}"
+            f"{current_backbone_lr_min:.8f}.."
+            f"{current_backbone_lr_max:.8f}"
         )
 
         print(

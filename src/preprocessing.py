@@ -198,7 +198,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Preprocess images recursively for "
-            "ResNet training."
+            "hulk-hand training."
         )
     )
 

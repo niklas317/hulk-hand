@@ -21,9 +21,9 @@ EMBEDDING_DIM = 384
 
 EXPECTED_ATTENTION_BLOCKS = 12
 
-# V6:
-# Fine-tune only the last two transformer blocks.
-NUM_TRAINABLE_BLOCKS = 2
+# V9:
+# Fine-tune the last eight transformer blocks.
+NUM_TRAINABLE_BLOCKS = 8
 
 
 class Opset13SelfAttention(nn.Module):
@@ -328,7 +328,7 @@ def replace_attention_for_opset13(
 
 class HulkHandDinoV2(nn.Module):
     """
-    hulk-hand V6 model.
+    hulk-hand V9 model.
 
     Architecture:
 
@@ -337,10 +337,10 @@ class HulkHandDinoV2(nn.Module):
                v
         DINOv2 ViT-S/14
                |
-        blocks 0-9
+        blocks 0-3
         FROZEN
                |
-        blocks 10-11
+        blocks 4-11
         TRAINABLE
                |
         final LayerNorm
@@ -361,6 +361,7 @@ class HulkHandDinoV2(nn.Module):
         self,
         num_classes: int,
         pretrained: bool = True,
+        num_trainable_blocks: int = NUM_TRAINABLE_BLOCKS,
     ) -> None:
 
         super().__init__()
@@ -376,10 +377,6 @@ class HulkHandDinoV2(nn.Module):
 
         self.embedding_dim = (
             EMBEDDING_DIM
-        )
-
-        self.num_trainable_blocks = (
-            NUM_TRAINABLE_BLOCKS
         )
 
         # ------------------------------------------------------
@@ -446,6 +443,20 @@ class HulkHandDinoV2(nn.Module):
                 "DINOv2 backbone has no final 'norm'."
             )
 
+        if num_trainable_blocks <= 0:
+            raise RuntimeError(
+                "num_trainable_blocks must be > 0."
+            )
+
+        if num_trainable_blocks > len(self.backbone.blocks):
+            raise RuntimeError(
+                "num_trainable_blocks exceeds the number of DINOv2 blocks."
+            )
+
+        self.num_trainable_blocks = int(
+            num_trainable_blocks
+        )
+
         # ------------------------------------------------------
         # Freeze complete backbone first
         # ------------------------------------------------------
@@ -461,7 +472,7 @@ class HulkHandDinoV2(nn.Module):
 
         first_trainable_block = (
             len(self.backbone.blocks)
-            - NUM_TRAINABLE_BLOCKS
+            - self.num_trainable_blocks
         )
 
         self.trainable_block_indices = tuple(
@@ -606,11 +617,13 @@ class HulkHandDinoV2(nn.Module):
 def build_model(
     num_classes: int,
     pretrained: bool = True,
+    num_trainable_blocks: int = NUM_TRAINABLE_BLOCKS,
 ) -> HulkHandDinoV2:
 
     return HulkHandDinoV2(
         num_classes=num_classes,
         pretrained=pretrained,
+        num_trainable_blocks=num_trainable_blocks,
     )
 
 
@@ -649,12 +662,13 @@ def validate_trainable_parameters(
     model: HulkHandDinoV2,
 ) -> None:
     """
-    Ensure only the intended V6 parts are trainable.
+    Ensure only the intended V9 parts are trainable.
     """
 
-    allowed_prefixes = (
-        "backbone.blocks.10.",
-        "backbone.blocks.11.",
+    allowed_prefixes = tuple(
+        f"backbone.blocks.{block_index}."
+        for block_index in model.trainable_block_indices
+    ) + (
         "backbone.norm.",
         "classifier.",
     )
@@ -684,9 +698,11 @@ def validate_trainable_parameters(
             )
         )
 
+    frozen_block_count = model.trainable_block_indices[0]
+
     for block_index in range(
         0,
-        10,
+        frozen_block_count,
     ):
 
         block = (
@@ -760,7 +776,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Build and smoke-test the hulk-hand "
-            "DINOv2 ViT-S/14 V6 model."
+            "DINOv2 ViT-S/14 V9 model."
         )
     )
 
@@ -832,7 +848,7 @@ def main() -> None:
 
     print()
     print(
-        "hulk-hand DINOv2 V6 model"
+        "hulk-hand DINOv2 V9 model"
     )
     print(
         "========================="
@@ -878,7 +894,7 @@ def main() -> None:
 
     print(
         "Trainable blocks: "
-        "10, 11"
+        f"{', '.join(str(index) for index in model.trainable_block_indices)}"
     )
 
     print(
@@ -901,6 +917,7 @@ def main() -> None:
     model = build_model(
         num_classes=args.num_classes,
         pretrained=True,
+        num_trainable_blocks=NUM_TRAINABLE_BLOCKS,
     )
 
     model.to(
@@ -955,7 +972,7 @@ def main() -> None:
     model.train()
 
     for block_index in range(
-        10
+        model.trainable_block_indices[0]
     ):
 
         if (
