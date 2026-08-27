@@ -46,25 +46,27 @@ The current active architecture is:
 DINOv2 ViT-S/14
 ```
 
-with the final two transformer blocks fine-tuned.
+with the last eight transformer blocks fine-tuned.
 
 The best model observed so far is:
 
 ```text
-Experiment          V6
+Experiment          V9
 Backbone            DINOv2 ViT-S/14
-Best epoch          10
-NEW val accuracy    78.95%
-NEW val loss         0.5795
+Best epoch          21
+NEW val accuracy    85.80%
+NEW val loss         0.5539
+Train accuracy      94.70%
+OLD val accuracy    93.46%
 ```
 
 Diagnostic evaluation of that checkpoint produced:
 
 ```text
-NEW train accuracy  95.61%
-NEW val accuracy    78.95%
+NEW train accuracy  94.70%
+NEW val accuracy    85.80%
 
-Generalization gap  16.66 percentage points
+Generalization gap  8.90 percentage points
 ```
 
 Validation by unseen session:
@@ -76,7 +78,7 @@ U    73.40%
 V    89.20%
 ```
 
-The current main limitation is therefore still **cross-session generalization**.
+The current main limitation is therefore still **cross-session generalization**, although V9 improved the gap substantially.
 
 The final NEW test sessions:
 
@@ -129,6 +131,18 @@ python src/model.py \
     --num-classes 4
 ```
 
+## 3. Build a filtered V10 dataset
+
+```bash
+python src/filter_new_images.py \
+    --input-dir /path/to/Dataset \
+    --output-dir /path/to/Dataset_V10 \
+    --overwrite
+```
+
+This creates `clean/` and `rejected/` under the output directory.
+`clean/` contains all `old/` samples plus the accepted `new/` samples.
+
 The current model smoke test verifies:
 
 ```text
@@ -176,12 +190,12 @@ and checks the model with ONNX Runtime.
 
 ## 4. Start the current training experiment
 
-Current V7 example:
+Current V9 example:
 
 ```bash
 python src/train.py \
     --data-dir /path/to/Dataset \
-    --output-dir checkpoints/training/v7 \
+    --output-dir checkpoints/training/v9 \
     --horizontal-flip
 ```
 
@@ -189,19 +203,19 @@ A fresh DINOv2 run does **not** require a HaGRID checkpoint.
 
 The pretrained DINOv2 backbone is loaded through `torch.hub`.
 
-## 5. Resume an interrupted V7 run
+## 5. Resume an interrupted V9 run
 
 ```bash
 python src/train.py \
     --data-dir /path/to/Dataset \
-    --output-dir checkpoints/training/v7 \
-    --resume checkpoints/training/v7/last.pt \
+    --output-dir checkpoints/training/v9 \
+    --resume checkpoints/training/v9/last.pt \
     --horizontal-flip
 ```
 
 Resume must only be used to continue the same experiment.
 
-Do not resume V6 when starting V7 or another independent experiment.
+Do not resume V6 when starting V9 or another independent experiment.
 
 ## 6. Diagnose the current best V6 checkpoint
 
@@ -2248,6 +2262,7 @@ V6 remains the best observed checkpoint.
 | V5 | DINOv2 ViT-S/14 | Frozen linear probe | 55.30% |
 | V6 | DINOv2 ViT-S/14 | Fine-tune final 2 blocks | **78.95%** |
 | V7 | DINOv2 ViT-S/14 | Lower LR + stronger regularization | 76.95%* |
+| V9 | DINOv2 ViT-S/14 | Fine-tune last 8 blocks + layerwise decay | **85.80%** |
 
 `*` Best value observed through epoch 12.
 
