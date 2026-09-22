@@ -1,0 +1,7 @@
+torch==2.12.0
+torchvision==0.27.0
+onnx==1.21.0
+onnxscript==0.7.0
+opencv-python==4.13.0.92
+onnxruntime==1.26.0
+Pillow>=10.0.0
