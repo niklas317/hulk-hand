@@ -220,3 +220,6 @@ __marimo__/
 # Repo related
 /checkpoints
 /dataset*
+
+/models
+/misclassifications
