@@ -79,7 +79,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Run webcam inference with the exported ResNet18 ONNX model")
-    parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "artifacts" / "export" / "ResNet18_4class_opset13_dual_output.onnx"), help="Path to the ONNX model")
+    parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "resnet18" / "artifacts" / "ResNet18_4class_opset13_dual_output.onnx"), help="Path to the ONNX model")
     parser.add_argument("--camera", default="/dev/video0", help="Camera device or video file path")
     parser.add_argument("--class-names", default=None, help="Comma-separated label list for model outputs")
     parser.add_argument("--class-file", default=None, help="Text file with one class name per line")

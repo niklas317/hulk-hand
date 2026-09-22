@@ -87,3 +87,7 @@ python3 resnet18/scripts/check_onnx_opset.py \
 TFLite conversion also requires the `onnx2tf` and TensorFlow packages from
 `requirements.txt`. TFLite may rename or reorder outputs; identify logits by
 shape `[batch, 4]` and the embedding by shape `[batch, 512]` after conversion.
+
+## Current Release Training Configuration
+
+The current released ResNet18 model was trained for **3 epochs** with a **batch size of 64** and an initial learning rate of **1e-4**. Training used **AdamW-style weight decay of 1e-4**, **5% label smoothing**, a **5% learning-rate warmup ratio**, and a **5% validation split**. Input images were processed at **224 × 224** resolution. The training run used **seed 42**, did **not** use class weighting, and was performed **without automatic mixed precision (AMP)**.

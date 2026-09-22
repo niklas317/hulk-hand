@@ -66,5 +66,8 @@ Thumbs.db
 !.env.example
 
 # Directories
-**/export
-*/artifacts
+*.pth
+*.onnx
+*.tflite
+export/
+runs/
