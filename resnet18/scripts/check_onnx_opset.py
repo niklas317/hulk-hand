@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Inspect an ONNX file and optionally enforce its default opset version."""
+
 from __future__ import annotations
 
 import argparse
@@ -7,6 +9,7 @@ from pathlib import Path
 
 
 def main() -> int:
+    """Load, validate, and report the ONNX model metadata."""
     parser = argparse.ArgumentParser(description="Check ONNX model opset version(s).")
     parser.add_argument("onnx_file", type=Path, help="Path to .onnx file")
     parser.add_argument("--expect", type=int, default=None, help="Expected ai.onnx opset version, e.g. 13")
@@ -43,6 +46,7 @@ def main() -> int:
 
     opsets: dict[str, int] = {}
     print("Opset imports:")
+    # ONNX can declare several domains; the default ai.onnx domain is the one we verify.
     for item in model.opset_import:
         domain = item.domain or "ai.onnx"
         opsets[domain] = item.version
@@ -54,6 +58,7 @@ def main() -> int:
         return 1
 
     if not args.no_checker:
+        # Metadata alone is not enough; the checker catches malformed graph structure.
         try:
             onnx.checker.check_model(model)
             print("ONNX checker: OK")

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Train the direct recursive-folder ResNet18 gesture classification pipeline."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import argparse
 import math
 import json
 import random
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -16,14 +18,18 @@ from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
 from torchvision.models import resnet18
 from PIL import Image
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "preprocessing"))
 from gesture_preprocessing import PreprocessConfig, build_eval_transform, build_train_transform
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CLASS_NAMES = ["one", "two", "stop", "no_gesture"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 class RecursiveLabelDataset(Dataset):
+    """Read images recursively from the fixed four-class directory layout."""
+
     def __init__(self, root: str | Path, transform=None, class_names: Sequence[str] = CLASS_NAMES) -> None:
         self.root = Path(root)
         self.transform = transform
@@ -50,6 +56,7 @@ class RecursiveLabelDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int):
+        # Open files per sample so workers do not retain image handles between batches.
         path, class_index = self.samples[index]
         with Image.open(path) as image:
             image = image.convert("RGB")
@@ -59,6 +66,7 @@ class RecursiveLabelDataset(Dataset):
 
 
 def dataset_labels(dataset: Dataset) -> List[int]:
+    """Retrieve labels efficiently from datasets and Subset wrappers."""
     if isinstance(dataset, Subset):
         source = dataset.dataset
         if hasattr(source, "samples"):
@@ -79,6 +87,7 @@ class ResNet18WithEmbedding(nn.Module):
         self.backbone = backbone
 
     def forward(self, x: torch.Tensor):
+        # Keep the embedding available for the matching ONNX export path.
         x = self.backbone.conv1(x)
         x = self.backbone.bn1(x)
         x = self.backbone.relu(x)
@@ -96,6 +105,7 @@ class ResNet18WithEmbedding(nn.Module):
 
 
 def load_checkpoint(checkpoint_path: str | Path) -> Dict[str, torch.Tensor]:
+    """Load the model state from the checkpoint produced by the base model."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if isinstance(checkpoint, dict):
         if "MODEL_STATE" in checkpoint:
@@ -107,6 +117,7 @@ def load_checkpoint(checkpoint_path: str | Path) -> Dict[str, torch.Tensor]:
 
 
 def load_matching_weights(model: ResNet18WithEmbedding, state_dict: Dict[str, torch.Tensor]) -> None:
+    """Load only tensors whose names and shapes match the four-class model."""
     model_state = model.backbone.state_dict()
     filtered_state = {}
 
@@ -130,6 +141,7 @@ def build_model(num_classes: int) -> ResNet18WithEmbedding:
 
 
 def stratified_split_indices(labels: Sequence[int], val_fraction: float, seed: int) -> tuple[List[int], List[int]]:
+    """Split each class independently so validation retains class coverage."""
     by_class: Dict[int, List[int]] = {idx: [] for idx in range(len(CLASS_NAMES))}
     for index, label in enumerate(labels):
         by_class[int(label)].append(index)
@@ -147,6 +159,7 @@ def stratified_split_indices(labels: Sequence[int], val_fraction: float, seed: i
             train_indices.extend(indices)
             continue
 
+        # Reserve at least one sample while keeping one sample available for training.
         val_count = max(1, int(round(len(indices) * val_fraction)))
         val_count = min(val_count, len(indices) - 1)
         val_indices.extend(indices[:val_count])
@@ -158,6 +171,7 @@ def stratified_split_indices(labels: Sequence[int], val_fraction: float, seed: i
 
 
 def compute_class_weights(labels: Sequence[int], num_classes: int) -> torch.Tensor:
+    """Return inverse-frequency weights for optional imbalanced training."""
     counts = torch.bincount(torch.tensor(labels), minlength=num_classes).float()
     counts = torch.clamp(counts, min=1.0)
     weights = counts.sum() / (num_classes * counts)
@@ -172,6 +186,7 @@ def collect_labels(dataset: Dataset) -> List[int]:
 
 
 def make_loader(dataset: Dataset, batch_size: int, num_workers: int, shuffle: bool, weighted: bool = False) -> DataLoader:
+    """Build a standard or class-balanced data loader."""
     sampler = None
     if weighted:
         labels = dataset_labels(dataset)
@@ -184,6 +199,7 @@ def make_loader(dataset: Dataset, batch_size: int, num_workers: int, shuffle: bo
 
 
 def build_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int, warmup_ratio: float):
+    """Create linear warmup followed by cosine decay over optimizer steps."""
     warmup_steps = max(1, int(total_steps * warmup_ratio))
 
     def lr_lambda(step: int) -> float:
@@ -215,6 +231,7 @@ class TrainingConfig:
 
 
 def train_one_epoch(model, loader, criterion, optimizer, scheduler, device, scaler, use_amp: bool):
+    """Run one optimization epoch and return mean loss and accuracy."""
     model.train()
     total_loss = 0.0
     total_correct = 0
@@ -248,6 +265,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, device, scal
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
+    """Evaluate the model without updating parameters."""
     model.eval()
     total_loss = 0.0
     total_correct = 0
@@ -268,6 +286,7 @@ def evaluate(model, loader, criterion, device):
 
 
 def save_checkpoint(output_dir: Path, model: nn.Module, config: TrainingConfig, class_names: Sequence[str], best_val_acc: float) -> None:
+    """Persist weights and the metadata needed to reproduce the trained model."""
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"MODEL_STATE": model.backbone.state_dict(), "class_names": list(class_names), "config": asdict(config), "best_val_acc": best_val_acc}, output_dir / "ResNet18_finetuned.pth")
     (output_dir / "class_names.txt").write_text("\n".join(class_names) + "\n")
@@ -275,11 +294,12 @@ def save_checkpoint(output_dir: Path, model: nn.Module, config: TrainingConfig, 
 
 
 def main() -> None:
+    """Configure datasets and run direct ResNet18 fine-tuning."""
     parser = argparse.ArgumentParser(description="Fine-tune ResNet18 for one, two, stop, no_gesture")
     parser.add_argument("--train-root", required=True, help="Dataset root containing one/, two/, stop/, and no_gesture/")
     parser.add_argument("--val-root", default=None, help="Optional validation dataset root with the same folder layout")
-    parser.add_argument("--pretrained-checkpoint", default="ResNet18.pth", help="Path to the pretrained checkpoint")
-    parser.add_argument("--output-dir", default="runs/resnet18", help="Directory for checkpoints and logs")
+    parser.add_argument("--pretrained-checkpoint", default=str(REPO_ROOT / "resnet18" / "artifacts" / "ResNet18.pth"), help="Path to the pretrained checkpoint")
+    parser.add_argument("--output-dir", default=str(REPO_ROOT / "resnet18" / "artifacts" / "runs" / "resnet18"), help="Directory for checkpoints and logs")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -350,6 +370,7 @@ def main() -> None:
     best_val_acc = 0.0
 
     for epoch in range(1, args.epochs + 1):
+        # Save only the best validation checkpoint so later export uses the strongest run.
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scheduler, device, scaler, args.amp and device.type == "cuda")
         val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 

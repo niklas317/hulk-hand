@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Command-line utility for applying the shared gesture image preprocessing."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from gesture_preprocessing import PreprocessConfig, iter_image_files, preprocess
 
 
 def preprocess_path(input_path: Path, output_path: Path, image_size: int) -> None:
+    """Process one file or mirror an entire image directory into the output."""
     config = PreprocessConfig(image_size=image_size)
 
     if input_path.is_file():
@@ -18,6 +20,7 @@ def preprocess_path(input_path: Path, output_path: Path, image_size: int) -> Non
         print(f"{input_path} -> {output_path}")
         return
 
+    # Preserve relative paths so class folders and nested source groups remain identifiable.
     output_path.mkdir(parents=True, exist_ok=True)
     for image_path in iter_image_files(input_path):
         relative = image_path.relative_to(input_path)
@@ -28,6 +31,7 @@ def preprocess_path(input_path: Path, output_path: Path, image_size: int) -> Non
 
 
 def main() -> None:
+    """Parse paths and run preprocessing from the command line."""
     parser = argparse.ArgumentParser(description="Preprocess gesture images into square model input")
     parser.add_argument("--input", required=True, help="Input image file or directory")
     parser.add_argument("--output", required=True, help="Output file or directory")

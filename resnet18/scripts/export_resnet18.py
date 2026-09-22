@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Export a fine-tuned ResNet18 to dual-output ONNX and optional TFLite."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from torchvision.models import resnet18
 
 CLASS_NAMES = ["one", "two", "stop", "no_gesture"]
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parents[1]
 
 
 class ResNet18WithEmbedding(nn.Module):
@@ -29,6 +31,7 @@ class ResNet18WithEmbedding(nn.Module):
         self.backbone = backbone
 
     def forward(self, x: torch.Tensor):
+        # Run the backbone explicitly so the penultimate feature vector is exportable.
         x = self.backbone.conv1(x)
         x = self.backbone.bn1(x)
         x = self.backbone.relu(x)
@@ -70,13 +73,15 @@ class LogitsOnlyWrapper(nn.Module):
 
 
 def resolve_repo_path(value: str | None, default_path: Path) -> Path:
+    """Resolve relative CLI paths from the repository rather than the shell cwd."""
     path = Path(value).expanduser() if value else default_path
     if not path.is_absolute():
-        path = SCRIPT_DIR / path
+        path = REPO_ROOT / path
     return path.resolve()
 
 
 def load_checkpoint_state(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
+    """Extract a state dictionary from common PyTorch checkpoint layouts."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Unsupported checkpoint format: {checkpoint_path}")
@@ -96,6 +101,7 @@ def load_checkpoint_state(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
 
 
 def normalize_state_dict_for_backbone(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Remove wrapper prefixes left by distributed or nested model training."""
     normalized: Dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         if not isinstance(tensor, torch.Tensor):
@@ -109,6 +115,7 @@ def normalize_state_dict_for_backbone(state_dict: Dict[str, torch.Tensor]) -> Di
 
 
 def read_class_names(path: Path, fallback: Sequence[str]) -> list[str]:
+    """Read checkpoint labels while retaining the standard four-class fallback."""
     if not path.exists():
         return list(fallback)
     names = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -116,6 +123,7 @@ def read_class_names(path: Path, fallback: Sequence[str]) -> list[str]:
 
 
 def load_model(checkpoint_path: Path, class_names: Sequence[str]) -> ResNet18WithEmbedding:
+    """Build the deployment model, load compatible weights, and switch to eval mode."""
     print(f"Loading checkpoint: {checkpoint_path}", flush=True)
     print(f"Class names: {list(class_names)}", flush=True)
 
@@ -141,6 +149,7 @@ def export_onnx(
     dynamic_batch: bool,
     dual_output: bool,
 ) -> None:
+    """Export either logits-only or dual-output inference with an optional batch axis."""
     dummy_input = torch.randn(batch_size, 3, image_size, image_size, dtype=torch.float32)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -195,6 +204,7 @@ def export_onnx(
 
 
 def verify_onnx_if_available(onnx_path: Path) -> None:
+    """Run ONNX structural validation when the optional checker is installed."""
     try:
         import onnx  # type: ignore
     except Exception:
@@ -213,8 +223,8 @@ def convert_to_tflite_with_onnx2tf(onnx_path: Path, saved_model_dir: Path, tflit
     """Convert ONNX -> TensorFlow SavedModel via onnx2tf, then SavedModel -> TFLite.
 
     The two ONNX outputs are preserved as two TensorFlow/TFLite outputs when the
-    converter supports this graph. TFLite may rename output tensors internally;
-    rely on output order if names are changed: output 0 = logits, output 1 = embedding.
+    converter supports this graph. TFLite may rename or reorder output tensors
+    internally, so inspect output names and shapes after conversion.
     """
     onnx2tf_bin = shutil.which("onnx2tf")
     if onnx2tf_bin is None:
@@ -224,6 +234,7 @@ def convert_to_tflite_with_onnx2tf(onnx_path: Path, saved_model_dir: Path, tflit
 
     print(f"Converting ONNX -> TensorFlow SavedModel: {saved_model_dir}", flush=True)
     saved_model_dir.parent.mkdir(parents=True, exist_ok=True)
+    # Keep conversion external so the exporter can report a useful missing-tool error.
     subprocess.run(
         [onnx2tf_bin, "-i", str(onnx_path), "-o", str(saved_model_dir)],
         check=True,
@@ -257,16 +268,17 @@ def convert_to_tflite_with_onnx2tf(onnx_path: Path, saved_model_dir: Path, tflit
 
 
 def main() -> None:
+    """Parse export options and produce the requested deployment artifacts."""
     parser = argparse.ArgumentParser(description="Export trained 4-class ResNet18 to ONNX opset 13 and optionally TFLite")
     parser.add_argument(
         "--checkpoint",
-        default="resnet18_4class_head/ResNet18_finetuned.pth",
-        help="Best trained checkpoint path, relative to repo root by default",
+        default="resnet18/artifacts/ResNet18_finetuned.pth",
+        help="Best trained checkpoint path, relative to the repository root by default",
     )
     parser.add_argument(
         "--output-dir",
-        default="resnet18_4class_head/export",
-        help="Output directory for ONNX/TFLite artifacts, relative to repo root by default",
+        default="resnet18/artifacts/export",
+        help="Output directory for ONNX/TFLite artifacts, relative to the repository root by default",
     )
     parser.add_argument("--onnx-name", default="ResNet18_4class_opset13_dual_output.onnx")
     parser.add_argument("--tflite-name", default="ResNet18_4class_dual_output.tflite")
@@ -280,8 +292,8 @@ def main() -> None:
     parser.add_argument("--skip-onnx-check", action="store_true", help="Skip optional ONNX checker")
     args = parser.parse_args()
 
-    checkpoint_path = resolve_repo_path(args.checkpoint, SCRIPT_DIR / "resnet18_4class_head" / "ResNet18_finetuned.pth")
-    output_dir = resolve_repo_path(args.output_dir, SCRIPT_DIR / "resnet18_4class_head" / "export")
+    checkpoint_path = resolve_repo_path(args.checkpoint, REPO_ROOT / "resnet18" / "artifacts" / "ResNet18_finetuned.pth")
+    output_dir = resolve_repo_path(args.output_dir, REPO_ROOT / "resnet18" / "artifacts" / "export")
     onnx_path = output_dir / args.onnx_name
     saved_model_dir = output_dir / args.saved_model_name
     tflite_path = output_dir / args.tflite_name
@@ -322,7 +334,7 @@ def main() -> None:
     else:
         print("Output0: logits [batch, 4] in class_names.txt order", flush=True)
         print("Output1: embedding [batch, 512] from the penultimate layer before fc", flush=True)
-        print("TFLite note: tensor names may change; if so, use output order: 0=logits, 1=embedding.", flush=True)
+        print("TFLite note: tensor names and output order may change; identify logits by shape [batch, 4] and embedding by [batch, 512].", flush=True)
     print("Remember: preprocessing is not embedded; apply the same RGB/224/to-tensor/normalization before inference.", flush=True)
 
 

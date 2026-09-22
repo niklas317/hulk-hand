@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Shared image preprocessing for training, image conversion, and inference.
+
+The module keeps resizing, normalization, augmentation, and camera-frame
+conversion in one place so every runtime can use the same model input format.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ class PreprocessConfig:
 
 
 def letterbox_square(image: Image.Image, image_size: int = DEFAULT_IMAGE_SIZE, fill: int = DEFAULT_FILL) -> Image.Image:
+    """Resize an image without distortion and center it on a square canvas."""
     image = image.convert("RGB")
     width, height = image.size
     scale = image_size / max(width, height)
@@ -46,6 +52,7 @@ def letterbox_square(image: Image.Image, image_size: int = DEFAULT_IMAGE_SIZE, f
 
 
 def build_preprocess_transform(config: PreprocessConfig = PreprocessConfig()):
+    """Build the deterministic transform used for evaluation and inference."""
     return transforms.Compose(
         [
             transforms.Lambda(lambda img: letterbox_square(img, config.image_size, config.fill)),
@@ -56,8 +63,10 @@ def build_preprocess_transform(config: PreprocessConfig = PreprocessConfig()):
 
 
 def build_train_transform(config: PreprocessConfig = PreprocessConfig(), augment: bool = True):
+    """Build training transforms, optionally adding visual and geometric noise."""
     ops = []
     if augment:
+        # Vary lighting and pose before letterboxing so augmentation reflects camera data.
         ops.extend(
             [
                 transforms.RandomApply([transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.02)], p=0.8),
@@ -78,12 +87,14 @@ def build_eval_transform(config: PreprocessConfig = PreprocessConfig()):
 
 
 def preprocess_bgr_frame(frame: np.ndarray, config: PreprocessConfig = PreprocessConfig()) -> np.ndarray:
+    """Convert an OpenCV BGR frame into a batched float32 NCHW tensor."""
     rgb = Image.fromarray(frame[:, :, ::-1].copy())
     tensor = build_preprocess_transform(config)(rgb)
     return tensor.unsqueeze(0).numpy().astype(np.float32)
 
 
 def preprocess_image_file(input_path: str | Path, output_path: str | Path, config: PreprocessConfig = PreprocessConfig()) -> Path:
+    """Convert one image file to the square representation used by the model."""
     input_path = Path(input_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +106,7 @@ def preprocess_image_file(input_path: str | Path, output_path: str | Path, confi
 
 
 def iter_image_files(root: str | Path) -> Iterable[Path]:
+    """Yield supported image files in stable recursive path order."""
     root = Path(root)
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:

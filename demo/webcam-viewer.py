@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+"""Run live four-class gesture inference from a camera or video source."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import List
 
@@ -9,6 +11,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "resnet18" / "preprocessing"))
 from gesture_preprocessing import PreprocessConfig, preprocess_bgr_frame
 
 
@@ -30,6 +33,7 @@ CLASS_NAMES = [
 
 
 def load_class_names(class_names_arg: str | None, class_file: str | None) -> List[str]:
+    """Resolve labels from CLI input, a file, or the model's standard order."""
     if class_file:
         path = Path(class_file)
         if not path.exists():
@@ -43,14 +47,17 @@ def load_class_names(class_names_arg: str | None, class_file: str | None) -> Lis
 
 
 def load_session(model_path: str | Path) -> ort.InferenceSession:
+    """Create a CPU ONNX Runtime session for the selected model."""
     return ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
 
 def preprocess_frame(frame: np.ndarray, image_size: int = 224) -> np.ndarray:
+    """Apply the shared preprocessing to one OpenCV frame."""
     return preprocess_bgr_frame(frame, PreprocessConfig(image_size=image_size))
 
 
 def annotate_frame(frame: np.ndarray, text: str) -> np.ndarray:
+    """Draw the predicted label over a camera frame."""
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (380, 56), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
@@ -68,10 +75,11 @@ def annotate_frame(frame: np.ndarray, text: str) -> np.ndarray:
 
 
 def main() -> None:
+    """Open the source, classify frames, and display results until exit."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Run webcam inference with the exported ResNet18 ONNX model")
-    parser.add_argument("--model", default=str(Path(__file__).with_name("ResNet18.onnx")), help="Path to the ONNX model")
+    parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "artifacts" / "export" / "ResNet18_4class_opset13_dual_output.onnx"), help="Path to the ONNX model")
     parser.add_argument("--camera", default="/dev/video0", help="Camera device or video file path")
     parser.add_argument("--class-names", default=None, help="Comma-separated label list for model outputs")
     parser.add_argument("--class-file", default=None, help="Text file with one class name per line")
@@ -100,6 +108,7 @@ def main() -> None:
 
             input_tensor = preprocess_frame(frame)
             logits = session.run(None, {input_name: input_tensor})[0]
+            # Softmax makes the displayed decision numerically stable without changing argmax.
             probs = np.exp(logits - np.max(logits, axis=1, keepdims=True))
             probs = probs / np.sum(probs, axis=1, keepdims=True)
             idx = int(np.argmax(probs, axis=1)[0])

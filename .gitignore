@@ -1,3 +1,70 @@
-**/export
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
 
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python tooling / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test / coverage / type checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PyTorch / ML checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# TensorBoard / training logs
+events.out.tfevents.*
+*.log
+
+# Profiling
+*.prof
+*.lprof
+
+# C / CUDA extensions
+*.so
+*.pyd
+*.dll
+*.dylib
+*.o
+*.obj
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Directories
+**/export
 */artifacts
