@@ -709,37 +709,13 @@ def export_onnx(
         model,
         (dummy_input,),
         str(output_path),
-
-        input_names=[
-            "input"
-        ],
-
-        output_names=[
-            "logits",
-            "embedding",
-        ],
-
+        export_params=True,
+        input_names=["input"],
+        output_names=["logits", "embedding"],
         opset_version=ONNX_OPSET,
-
-        # Fixed input shape:
-        # [1, 3, 224, 224]
-        dynamic_shapes=None,
-
-        # Keep the entire model in one .onnx file.
-        external_data=False,
-
-        # Current torch.export-based exporter.
-        dynamo=True,
-    )
-
-    if not output_path.is_file():
-        raise RuntimeError(
-            "ONNX exporter did not create "
-            "the output file."
-        )
-
-    print(
-        f"[OK] exported: {output_path}"
+        do_constant_folding=True,
+        dynamic_axes=None,
+        dynamo=False,
     )
 
 
