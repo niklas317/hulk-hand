@@ -6,28 +6,42 @@ The BSD 3-Clause License contained in this repository applies only to original s
 
 ## HaGRID
 
-The ResNet18 model provided with this project is derived from the HaGRID project.
+This project uses the HaGRID dataset and pretrained HaGRID model assets as upstream training resources.
 
 Upstream project:
 
 https://github.com/hukenovs/hagrid
 
-The initial pretrained ResNet18 checkpoint was obtained from the HaGRID project:
+The initial pretrained ResNet18 checkpoint used for training was obtained from the HaGRID project:
 
 https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/ResNet18.pth
 
-HaGRID dataset samples were additionally used during fine-tuning.
+The HaGRID dataset and the original pretrained checkpoint are not included in this repository.
 
-The upstream checkpoint was modified by fine-tuning it for this project's gesture-classification task. Resulting model artifacts may include PyTorch (`.pth`), ONNX (`.onnx`) and TensorFlow Lite (`.tflite`) representations of the fine-tuned model.
+HaGRID dataset samples were used during fine-tuning.
 
-HaGRID is distributed under the HaGRID project license, which is based on the Creative Commons Attribution-ShareAlike 4.0 International License but constitutes a separate project-specific license.
+The upstream checkpoint was modified by replacing and training the classification head for this project's gesture-classification task. Resulting model artifacts include PyTorch (`.pth`), ONNX (`.onnx`), and TensorFlow Lite (`.tflite`) representations of the fine-tuned model.
 
-The applicable HaGRID license can be found here:
+### Upstream License
+
+HaGRID is distributed under a project-specific license described by the HaGRID project as a variant of the Creative Commons Attribution-ShareAlike 4.0 International License.
+
+The applicable upstream HaGRID license can be found here:
 
 https://github.com/hukenovs/hagrid/blob/master/license/en_us.pdf
 
-HaGRID data, pretrained model assets, and model artifacts derived from them are not relicensed under this repository's BSD 3-Clause License. They remain subject to the applicable HaGRID license terms.
+The HaGRID dataset and original pretrained model assets remain subject to the HaGRID project license and are not relicensed under this repository's BSD 3-Clause License.
 
-When redistributing or further modifying these model artifacts, users are responsible for complying with the HaGRID license, including applicable attribution, modification-notice, and licensing requirements.
+### Derived Model Artifacts
+
+The model artifacts produced by this project from HaGRID material, including the fine-tuned PyTorch checkpoint and its ONNX and TensorFlow Lite representations, are distributed by this project under the **Creative Commons Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0)**.
+
+License:
+
+https://creativecommons.org/licenses/by-sa/4.0/
+
+This licensing applies to the derived model artifacts only. It does not replace or modify the license applicable to the original HaGRID dataset, pretrained checkpoints, or other upstream HaGRID material.
+
+Redistributions or adaptations of these model artifacts must comply with the applicable CC BY-SA 4.0 requirements, including attribution, indication of modifications, and ShareAlike requirements, as well as any upstream obligations that continue to apply from the HaGRID material from which they were derived.
 
 Use of HaGRID does not imply endorsement of this project by the HaGRID authors or rights holders.
