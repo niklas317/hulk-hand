@@ -71,3 +71,6 @@ Thumbs.db
 dinov2/artifacts/
 dinov2/checkpoints/
 */artifacts
+*.tflite
+export/
+runs/
