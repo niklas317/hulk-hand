@@ -259,7 +259,7 @@ def main() -> None:
     )
 
     for variant in variants:
-        output_path = args.output_dir / f"hulk_hand_v11_{variant}.onnx"
+        output_path = args.output_dir / f"hulk_hand_v12_{variant}.onnx"
         export_variant(checkpoint, variant, output_path, args.seed)
 
 

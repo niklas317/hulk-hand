@@ -55,3 +55,27 @@
   - LR classifier: 0.00006271
   - Early stopping triggered at 4/4
 - Checkpoints: to be added manually later
+
+## V12 - NEW-only training
+
+- Dataset: NEW custom recordings only
+- OLD/HaGRID samples: not loaded
+- Backbone: DINOv2 ViT-S/14
+- Training setup: last 10 transformer blocks fine-tuned with layerwise LR decay
+- Training data: sessions A-R
+- Validation data: sessions S-V
+- Test data: sessions W-Z remain untouched
+- Batch sampling: class-balanced, 32 samples per batch, 8 per class
+- Checkpoint epoch: 29
+- Outcome:
+  - NEW train accuracy: 98.61%
+  - NEW validation accuracy: 89.00%
+  - Generalization gap: 9.61 percentage points
+  - Saved/recomputed validation difference: +0.0000 pp
+- Validation by session:
+  - S: 94.20%
+  - T: 82.00%
+  - U: 83.60%
+  - V: 96.20%
+- Main remaining error: gesture_2, especially sessions T and U
+- Checkpoints: `checkpoints/training/v12/best.pt` and `last.pt`

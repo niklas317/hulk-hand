@@ -7,8 +7,8 @@ Run one variant:
 
 ```bash
 python src/exporter/export_variants.py \
-    --checkpoint checkpoints/training/v11/best.pt \
-    --output-dir models/onnx/v11 \
+    --checkpoint checkpoints/training/v12/best.pt \
+    --output-dir models/onnx/v12 \
     --variant baseline
 ```
 
@@ -23,3 +23,8 @@ Available variants:
 Every result is checked for ONNX validity, Opset 13, fixed input shape, and
 the expected logits/embedding outputs. PyTorch and ONNX Runtime maximum
 absolute differences are printed for comparison.
+
+The Resize and combined variants should not be selected automatically: cubic
+to linear positional-embedding interpolation produced a substantial numerical
+difference during V12 validation. Test `baseline`, `gelu`, and `pow` with the
+deployment quantizer first.

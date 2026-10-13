@@ -51,34 +51,36 @@ with the last ten transformer blocks fine-tuned.
 The best model observed so far is:
 
 ```text
-Experiment          V10
+Experiment          V12
 Backbone            DINOv2 ViT-S/14
-Best epoch          30
-NEW val accuracy    86.87%
-NEW val loss         0.5248
-Train accuracy      96.90%
-OLD val accuracy    94.23%
+Training data       NEW only
+Best epoch          29
+NEW val accuracy    89.00%
+Train accuracy      98.61%
+Generalization gap  9.61 percentage points
 ```
 
 Diagnostic evaluation of that checkpoint produced:
 
 ```text
-NEW train accuracy  96.90%
-NEW val accuracy    86.87%
+NEW train accuracy  98.61%
+NEW val accuracy    89.00%
 
-Generalization gap  10.03 percentage points
+Generalization gap  9.61 percentage points
 ```
 
 Validation by unseen session:
 
 ```text
-S    83.80%
-T    69.40%
-U    73.40%
-V    89.20%
+S    94.20%
+T    82.00%
+U    83.60%
+V    96.20%
 ```
 
-The current main limitation is therefore still **cross-session generalization**, although V10 improved the NEW validation score further.
+V12 is the current best development result and is close to the approximately
+90% NEW-validation target. The remaining limitation is cross-session
+generalization, especially for `gesture_2` in sessions T and U.
 
 V11 was run on the enhanced dataset with the last ten blocks trainable, but it did not surpass V10:
 
@@ -90,7 +92,7 @@ NEW val accuracy    86.67%
 NEW val loss        0.5235
 ```
 
-It remains useful as the current training configuration, but V10 is still the best observed checkpoint.
+V11 remains a useful historical comparison, but V12 is now the best observed checkpoint.
 
 The final NEW test sessions:
 
@@ -164,7 +166,7 @@ The current model smoke test verifies:
 ```text
 DINOv2 ViT-S/14 loads
 12 attention blocks are replaced
-blocks 10 and 11 are trainable
+ blocks 2 through 11 are trainable
 final norm is trainable
 classifier is trainable
 forward pass succeeds
@@ -271,7 +273,7 @@ python src/diagnose_v12.py \
     --checkpoint checkpoints/training/v12/best.pt
 ```
 
-## 6. Diagnose the current best V6 checkpoint
+## 7. Diagnose a development checkpoint
 
 ```bash
 python src/diagnose.py \
@@ -294,7 +296,7 @@ using deterministic preprocessing and no augmentation.
 
 It does not touch W-Z.
 
-## 7. Final test evaluation
+## 8. Final test evaluation
 
 Final evaluation is intentionally postponed.
 
@@ -308,7 +310,7 @@ must only be evaluated after model development and model selection are complete.
 
 The current project is still being optimized, so W-Z should remain untouched.
 
-## 8. Final ONNX export
+## 9. Final ONNX export
 
 Architectural DINOv2 Opset-13 compatibility has already been tested successfully.
 
@@ -333,6 +335,21 @@ ONNX Opset
 13
 ```
 
+For deployment compatibility testing with the current V12 checkpoint, use
+the export strategy collection:
+
+```bash
+python src/exporter/export_variants.py \
+    --checkpoint checkpoints/training/v12/best.pt \
+    --output-dir models/onnx/v12 \
+    --variant all
+```
+
+The baseline, GELU, and Pow variants should be tested with the fixed
+quantization pipeline first. The Resize and combined variants require extra
+accuracy review because changing DINOv2 positional-embedding interpolation
+can significantly alter the outputs.
+
 ---
 
 # Architecture
@@ -353,25 +370,14 @@ Input
 Patch embedding
         │
         ▼
-DINOv2 transformer block 0
-        │
-        ▼
-...
-        │
-        ▼
-DINOv2 transformer block 9
-        │
-        └──────────── FROZEN
-        │
-        ▼
-DINOv2 transformer block 10
-        │
-        └──────────── TRAINABLE
-        │
-        ▼
-DINOv2 transformer block 11
-        │
-        └──────────── TRAINABLE
+        DINOv2 transformer blocks 0-1
+         │
+         └──────────── FROZEN
+         │
+         ▼
+        DINOv2 transformer blocks 2-11
+         │
+         └──────────── TRAINABLE
         │
         ▼
 Final LayerNorm
@@ -397,20 +403,19 @@ The current model contains:
 
 ```text
 Total parameters       22,058,116
-Frozen parameters      18,505,344
-Trainable parameters    3,552,772
+Frozen parameters       4,303,488
+Trainable parameters   17,754,628
 ```
 
 The trainable parts are:
 
 ```text
-backbone.blocks.10
-backbone.blocks.11
+backbone.blocks.2 through backbone.blocks.11
 backbone.norm
 classifier
 ```
 
-Everything before block 10 remains frozen.
+Everything before block 2 remains frozen.
 
 ---
 
@@ -1096,7 +1101,7 @@ camera placement
 
 ---
 
-# Training sampling
+# Historical OLD/NEW training sampling
 
 The active sampler uses:
 
@@ -1135,7 +1140,8 @@ This prevents the physical `no_gesture` class size from automatically dominating
 
 If a class does not contain enough unique images for its epoch quota, samples may be reused.
 
-The 25/75 configuration was introduced in V4 and retained for the current DINOv2 experiments.
+The 25/75 configuration was used through V11. V12 uses NEW-only sampling as
+described below.
 
 ---
 
@@ -1180,7 +1186,75 @@ Any future attempt to use mixed precision must first pass numerical smoke testin
 
 ---
 
-# Current fine-tuning configuration
+# V12 training configuration
+
+V12 is the current active training configuration:
+
+```text
+Architecture           DINOv2 ViT-S/14
+Frozen                 transformer blocks 0-1
+Trainable              transformer blocks 2-11
+                       final LayerNorm
+                       classifier
+
+Dataset                NEW only
+Training sessions      A-R
+Validation sessions    S-V
+Test sessions          W-Z (untouched)
+
+Precision              FP32
+Batch size             32
+Samples per class      8 per batch
+Batches / epoch        281
+Samples / epoch        8,992
+
+Optimizer              AdamW
+Backbone LR            2.5e-6 base
+Layerwise LR decay     0.85
+Classifier LR          2e-4
+Weight decay           1e-4
+Label smoothing        0.05
+Warm-up                3 epochs
+Scheduler               cosine decay
+Gradient clipping      1.0
+Maximum epochs         40
+Early stopping         patience 4
+```
+
+V12 best checkpoint:
+
+```text
+Epoch                  29
+NEW train accuracy     98.61%
+NEW validation         89.00%
+Generalization gap     9.61 percentage points
+```
+
+Validation by session:
+
+```text
+S                        94.20%
+T                        82.00%
+U                        83.60%
+V                        96.20%
+```
+
+The main remaining weakness is `gesture_2`, particularly in sessions T and
+U. The validation confusion is dominated by `gesture_2` being predicted as
+`gesture_1`.
+
+V12 diagnosis summary:
+
+```text
+gesture_2 validation accuracy       81.00%
+gesture_2 in session T              69.00%
+gesture_2 in session U              59.00%
+gesture_2 → gesture_1 errors        67 samples
+```
+
+---
+
+# Historical V7 fine-tuning configuration
 
 The current V7 experiment uses the same architecture as V6:
 
@@ -1231,9 +1305,9 @@ The intention is to reduce overfitting and improve unseen-session generalization
 
 ---
 
-# V6 training configuration
+# Historical V6 training configuration
 
-V6 currently remains the best-performing experiment.
+V6 is retained as a historical comparison experiment.
 
 ```text
 Architecture           DINOv2 ViT-S/14
@@ -2319,6 +2393,7 @@ V6 remains the best observed checkpoint.
 | V9 | DINOv2 ViT-S/14 | Fine-tune last 8 blocks + layerwise decay | 85.80% |
 | V10 | DINOv2 ViT-S/14 | V9 setup on enhanced dataset | **86.87%** |
 | V11 | DINOv2 ViT-S/14 | Last 10 blocks + lower LR | 86.67% |
+| V12 | DINOv2 ViT-S/14 | NEW-only class-balanced training | **89.00%** |
 
 `*` Best value observed through epoch 12.
 
@@ -2367,7 +2442,10 @@ blur
 background
 ```
 
-A model with approximately 79% validation accuracy is not currently considered sufficiently reliable for deployment.
+V12 reached 89.00% NEW validation accuracy and is close to the current
+approximately 90% development target, but it is not yet considered final.
+The remaining gap is concentrated in sessions T and U, especially for
+`gesture_2`.
 
 Development therefore continues before W-Z is opened.
 
