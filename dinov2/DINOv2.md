@@ -26,8 +26,7 @@ The four output classes are:
 
 ## Dataset
 
-The active pipeline uses only the custom NEW dataset. OLD/HaGRID samples are
-not loaded.
+The active pipeline uses a private dataset that was recorded. It features 26 different recording sessions with different scenes and compositions, but all feature a person with a green glove on one hand showing the gesture.
 
 ```text
 A-R: training
@@ -50,14 +49,13 @@ Dataset/
 └── no_gesture/
 ```
 
-## V12 result
+## Result
 
-The current best checkpoint is the V12 development checkpoint:
+The current best checkpoint:
 
 ```text
-Best epoch:          29
-NEW train accuracy:  98.61%
-NEW validation:      89.00%
+Train accuracy:  98.61%
+Validation accuracy:      89.00%
 Generalization gap:  9.61 percentage points
 ```
 
@@ -81,6 +79,49 @@ python -m pip install -r dinov2/requirements.txt
 
 DINOv2 is loaded through `torch.hub`. The upstream repository and pretrained
 weights retain their own licenses and terms.
+
+## Offline Dataset Preprocessing
+
+The images used for the training run were preprocessed **offline**, before
+being passed to the training script. The preprocessing step letterboxes each
+original image to **224 × 224** using the `fit-pad` mode: it preserves the
+original aspect ratio, centers the image, fills unused space with **black
+padding**, and saves the result as an RGB JPEG (default quality: 90).
+
+Additionally, an ImageNet normalization is then applieds:
+
+```text
+mean = (0.485, 0.456, 0.406)
+std  = (0.229, 0.224, 0.225)
+```
+
+To prepare a dataset with the same class and session folder structure, run:
+
+```bash
+python dinov2/preprocessing/preprocess_dinov2_images.py \
+    --input-dir /path/to/raw/Dataset \
+    --output-dir /path/to/Dataset \
+    --mode fit-pad \
+    --image-size 224 \
+    --quality 90
+```
+
+The input and output directories must be separate, and the output directory
+must not be inside the input directory. The script retains the relative
+class/session folder structure.
+
+**Train on the preprocessed dataset**, as shown in the Training section below.
+The dataset loader in `dinov2/scripts/dataset.py` applies
+`Resize((224, 224))` when reading images; because the stored images are already
+224 × 224 squares, this does not introduce aspect-ratio distortion. Training
+then applies its random data augmentations and ImageNet normalization.
+Validation and testing use the same stored images without random augmentation.
+
+During webcam inference, `dinov2/preprocessing/dinov2_preprocessing.py`
+performs the equivalent **fit-pad letterboxing on each incoming frame** before
+normalization. The ONNX model does not include preprocessing, so deployment
+applications must reproduce this step. Unlike offline dataset preparation,
+webcam inference does not save a JPEG intermediate.
 
 ## Training
 
@@ -117,7 +158,8 @@ python dinov2/scripts/diagnose-dinov2.py \
 
 ## Final test evaluation
 
-The final test script is intentionally reserved for one evaluation on W-Z:
+Following model selection, the finalized V12 checkpoint was evaluated on
+held-out sessions W-Z with:
 
 ```bash
 python dinov2/scripts/evaluate-dinov2.py \
@@ -125,7 +167,32 @@ python dinov2/scripts/evaluate-dinov2.py \
     --checkpoint /path/to/checkpoints/dinov2/best.pt
 ```
 
-Do not run this during model development or checkpoint selection.
+Final held-out test results (2,000 images):
+
+```text
+Overall accuracy:    89.35% (1,787 / 2,000)
+
+Per-class accuracy:
+gesture_1:           74.75% (299 / 400)
+gesture_2:           95.50% (382 / 400)
+gesture_3:           99.50% (398 / 400)
+no_gesture:          88.50% (708 / 800)
+```
+
+Confusion matrix (rows = true class, columns = predicted class):
+
+| Actual / Predicted | `gesture_1` | `gesture_2` | `gesture_3` | `no_gesture` |
+|---|---:|---:|---:|---:|
+| `gesture_1` | 299 | 9 | 1 | 91 |
+| `gesture_2` | 3 | 382 | 0 | 15 |
+| `gesture_3` | 0 | 0 | 398 | 2 |
+| `no_gesture` | 25 | 41 | 26 | 708 |
+
+The largest test-set error category is `gesture_1` predicted as `no_gesture`
+(91 of 400 `gesture_1` images). The held-out test accuracy is close to the
+89.00% validation accuracy, but per-class performance differs. These results
+were obtained after V12 was finalized and should not be used to reselect or
+tune the checkpoint.
 
 ## ONNX export
 
@@ -152,16 +219,3 @@ Opset:     13
 Export-time compatibility changes do not modify the checkpoint or require
 retraining. Resize conversion is not recommended because changing DINOv2's
 positional-embedding interpolation caused a significant numerical deviation.
-
-## Preprocessing
-
-Stored images are RGB JPEGs. Inference uses 224x224 images with ImageNet
-normalization:
-
-```text
-mean = (0.485, 0.456, 0.406)
-std  = (0.229, 0.224, 0.225)
-```
-
-Preprocessing is not embedded in the ONNX graph and must be reproduced by the
-deployment application.

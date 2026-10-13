@@ -4,7 +4,7 @@
 pipelines:
 
 - [ResNet18](resnet18/RESNET18.md) — the completed legacy pipeline.
-- [DINOv2](dinov2/DINOv2.md) — the current development model.
+- [DINOv2](dinov2/DINOv2.md) — the completed legacy pipeline.
 
 Both models use `[batch, 3, 224, 224]` inputs and produce four-class logits,
 but their preprocessing, embeddings, checkpoints, and requirements remain
@@ -39,14 +39,14 @@ artifact uses different labels.
 ## License
 
 Original source code authored for this repository is distributed under the
-**BSD 3-Clause License**.
+**MIT License**.
 
-Third-party datasets, pretrained model weights, and model artifacts derived
-from third-party material may be subject to separate license terms.
+The model artifacts are licensed separately:
 
-In particular, the ResNet18 model artifacts are derived from the **HaGRID**
-project and remain subject to the applicable HaGRID license terms. For
-attribution, upstream sources, modifications, and third-party licensing
+- **ResNet18** artifacts are distributed under **CC BY-SA 4.0**, subject to applicable **HaGRID** upstream license terms.
+- **DINOv2** artifacts are distributed under the **Apache License 2.0** and incorporate Meta's Apache-licensed pretrained DINOv2 weights.
+
+For attribution, upstream sources, modifications, and third-party licensing
 information, see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## AI-Assisted Development

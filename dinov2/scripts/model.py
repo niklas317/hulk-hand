@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-DINOV2_REPO = "facebookresearch/dinov2"
+DINOV2_REPO = "facebookresearch/dinov2:7764ea0f912e53c92e82eb78a2a1631e92725fc8"
 DINOV2_MODEL = "dinov2_vits14"
 
 IMAGE_SIZE = 224
@@ -387,6 +387,7 @@ class HulkHandDinoV2(nn.Module):
             DINOV2_REPO,
             DINOV2_MODEL,
             pretrained=pretrained,
+            skip_validation=True,
         )
 
         # ------------------------------------------------------
