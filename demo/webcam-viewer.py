@@ -14,6 +14,12 @@ import onnxruntime as ort
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "resnet18" / "preprocessing"))
 from gesture_preprocessing import PreprocessConfig, preprocess_bgr_frame
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dinov2" / "preprocessing"))
+from dinov2_preprocessing import (  # noqa: E402
+    PreprocessConfig as DinoPreprocessConfig,
+    preprocess_bgr_frame as preprocess_dinov2_frame,
+)
+
 
 """
 Class mapping:
@@ -51,9 +57,21 @@ def load_session(model_path: str | Path) -> ort.InferenceSession:
     return ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
 
-def preprocess_frame(frame: np.ndarray, image_size: int = 224) -> np.ndarray:
-    """Apply the shared preprocessing to one OpenCV frame."""
-    return preprocess_bgr_frame(frame, PreprocessConfig(image_size=image_size))
+def preprocess_frame(
+    frame: np.ndarray,
+    preprocessing: str,
+    image_size: int = 224,
+) -> np.ndarray:
+    """Apply the selected model's preprocessing to one OpenCV frame."""
+    if preprocessing == "resnet18":
+        return preprocess_bgr_frame(
+            frame,
+            PreprocessConfig(image_size=image_size),
+        )
+    return preprocess_dinov2_frame(
+        frame,
+        DinoPreprocessConfig(image_size=image_size),
+    )
 
 
 def annotate_frame(frame: np.ndarray, text: str) -> np.ndarray:
@@ -78,9 +96,21 @@ def main() -> None:
     """Open the source, classify frames, and display results until exit."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run webcam inference with the exported ResNet18 ONNX model")
-    parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "artifacts" / "export" / "ResNet18_4class_opset13_dual_output.onnx"), help="Path to the ONNX model")
+    parser = argparse.ArgumentParser(
+        description="Run live hulk-hand inference with an exported ONNX model."
+    )
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Path to the ONNX model downloaded from a release.",
+    )
     parser.add_argument("--camera", default="/dev/video0", help="Camera device or video file path")
+    parser.add_argument(
+        "--preprocessing",
+        required=True,
+        choices=("resnet18", "dinov2"),
+        help="Preprocessing pipeline matching the selected model.",
+    )
     parser.add_argument("--class-names", default=None, help="Comma-separated label list for model outputs")
     parser.add_argument("--class-file", default=None, help="Text file with one class name per line")
     args = parser.parse_args()
@@ -93,6 +123,22 @@ def main() -> None:
 
     session = load_session(model_path)
     input_name = session.get_inputs()[0].name
+    output_names = [output.name for output in session.get_outputs()]
+
+    input_shape = list(session.get_inputs()[0].shape)
+    if len(input_shape) != 4 or input_shape[1:] != [3, 224, 224]:
+        raise RuntimeError(
+            "Expected an ONNX input shaped [batch, 3, 224, 224], "
+            f"got {input_shape}."
+        )
+
+    if "logits" in output_names:
+        logits_output_name = "logits"
+    elif output_names:
+        logits_output_name = output_names[0]
+    else:
+        raise RuntimeError("ONNX model has no outputs.")
+
     class_names = load_class_names(args.class_names, args.class_file)
 
     capture_backend = cv2.CAP_V4L2 if str(camera_path).startswith("/dev/") else cv2.CAP_ANY
@@ -106,8 +152,14 @@ def main() -> None:
             if not ok:
                 break
 
-            input_tensor = preprocess_frame(frame)
-            logits = session.run(None, {input_name: input_tensor})[0]
+            input_tensor = preprocess_frame(
+                frame,
+                preprocessing=args.preprocessing,
+            )
+            logits = session.run(
+                [logits_output_name],
+                {input_name: input_tensor},
+            )[0]
             # Softmax makes the displayed decision numerically stable without changing argmax.
             probs = np.exp(logits - np.max(logits, axis=1, keepdims=True))
             probs = probs / np.sum(probs, axis=1, keepdims=True)
@@ -115,7 +167,7 @@ def main() -> None:
             label = class_names[idx] if idx < len(class_names) else str(idx)
 
             annotated = annotate_frame(frame, label)
-            cv2.imshow("HaGRID ResNet18", annotated)
+            cv2.imshow("hulk-hand", annotated)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):

@@ -20,7 +20,7 @@ possible hand pose is covered by the model.
 
 The base model is the 34-class HaGRID ResNet18 checkpoint downloaded from the
 URL below. The final fully connected layer is replaced with a four-output
-classifier. `scripts/train_resnet18.py` supports both full fine-tuning and
+classifier. `scripts/train-resnet18.py` supports both full fine-tuning and
 classifier-only training with `--freeze-backbone`.
 
 Download the base checkpoint into `resnet18/artifacts/`:
@@ -66,7 +66,7 @@ and users. Validate on representative camera frames before deployment.
 ## Training Command
 
 ```bash
-python3 resnet18/scripts/train_resnet18.py \
+python3 resnet18/scripts/train-resnet18.py \
   --train-root /path/to/dataset \
   --epochs 40 \
   --batch-size 64 \
@@ -76,10 +76,10 @@ python3 resnet18/scripts/train_resnet18.py \
 ## Export
 
 ```bash
-python3 resnet18/scripts/export_resnet18.py \
+python3 resnet18/scripts/export-resnet18.py \
   --checkpoint resnet18/artifacts/runs/resnet18/ResNet18_finetuned.pth \
   --output-dir resnet18/artifacts/export
-python3 resnet18/scripts/check_onnx_opset.py \
+python3 resnet18/scripts/check-onnx-opset.py \
   resnet18/artifacts/export/ResNet18_4class_opset13_dual_output.onnx \
   --expect 13
 ```

@@ -33,6 +33,7 @@ htmlcov/
 *.pt
 *.pth
 *.ckpt
+*.onnx
 
 # TensorBoard / training logs
 events.out.tfevents.*
@@ -67,4 +68,6 @@ Thumbs.db
 
 # Directories
 **/export
+dinov2/artifacts/
+dinov2/checkpoints/
 */artifacts
