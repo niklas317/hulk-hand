@@ -11,9 +11,7 @@ Embedding: 384 dimensions
 Classifier: Linear(384, 4)
 ```
 
-Transformer blocks `0-1` are frozen. Blocks `2-11`, the final LayerNorm, and
-the classifier are trainable. Attention is replaced with a classical
-Opset-13-compatible implementation.
+Transformer blocks `0-1` are frozen. Blocks `2-11`, the final LayerNorm, and the classifier are trainable. Attention is replaced with a classical Opset-13-compatible implementation.
 
 The four output classes are:
 
@@ -34,8 +32,7 @@ S-V: validation
 W-Z: final test
 ```
 
-W-Z must remain untouched until model development and model selection are
-complete.
+W-Z must remain untouched until model development and model selection are complete.
 
 The expected dataset layout is:
 
@@ -69,7 +66,6 @@ V: 96.20%
 ```
 
 The remaining weakness is `gesture_2`, particularly in sessions T and U.
-The final W-Z test has not been opened.
 
 ## Requirements
 
@@ -82,13 +78,9 @@ weights retain their own licenses and terms.
 
 ## Offline Dataset Preprocessing
 
-The images used for the training run were preprocessed **offline**, before
-being passed to the training script. The preprocessing step letterboxes each
-original image to **224 × 224** using the `fit-pad` mode: it preserves the
-original aspect ratio, centers the image, fills unused space with **black
-padding**, and saves the result as an RGB JPEG (default quality: 90).
+The images used for the training run were preprocessed **offline**, before being passed to the training script. The preprocessing step letterboxes each original image to **224 × 224** using the `fit-pad` mode: it preserves the original aspect ratio, centers the image, fills unused space with **black padding**, and saves the result as an RGB JPEG (default quality: 90).
 
-Additionally, an ImageNet normalization is then applieds:
+Additionally, an ImageNet normalization is applied after te resize during runtime:
 
 ```text
 mean = (0.485, 0.456, 0.406)
@@ -106,22 +98,11 @@ python dinov2/preprocessing/preprocess_dinov2_images.py \
     --quality 90
 ```
 
-The input and output directories must be separate, and the output directory
-must not be inside the input directory. The script retains the relative
-class/session folder structure.
+The input and output directories must be separate, and the output directory must not be inside the input directory. The script retains the relative class/session folder structure.
 
-**Train on the preprocessed dataset**, as shown in the Training section below.
-The dataset loader in `dinov2/scripts/dataset.py` applies
-`Resize((224, 224))` when reading images; because the stored images are already
-224 × 224 squares, this does not introduce aspect-ratio distortion. Training
-then applies its random data augmentations and ImageNet normalization.
-Validation and testing use the same stored images without random augmentation.
+**Train on the preprocessed dataset**, as shown in the Training section below. The dataset loader in `dinov2/scripts/dataset.py` applies `Resize((224, 224))` when reading images; because the stored images are already 224 × 224 squares, this does not introduce aspect-ratio distortion. Training then applies its random data augmentations and ImageNet normalization. Validation and testing use the same stored images without random augmentation. 
 
-During webcam inference, `dinov2/preprocessing/dinov2_preprocessing.py`
-performs the equivalent **fit-pad letterboxing on each incoming frame** before
-normalization. The ONNX model does not include preprocessing, so deployment
-applications must reproduce this step. Unlike offline dataset preparation,
-webcam inference does not save a JPEG intermediate.
+During webcam inference, `dinov2/preprocessing/dinov2_preprocessing.py` performs the equivalent **fit-pad letterboxing on each incoming frame** before normalization. The ONNX model does not include preprocessing, so deployment applications must reproduce this step. Unlike offline dataset preparation, webcam inference does not save a JPEG intermediate.
 
 ## Training
 
@@ -142,13 +123,11 @@ python dinov2/scripts/train-dinov2.py \
     --horizontal-flip
 ```
 
-Training uses FP32, AdamW, class-balanced NEW-only batches, 32 samples per
-batch, 281 batches per epoch, cosine decay, and early stopping patience 4.
+Training uses FP32, AdamW, class-balanced NEW-only batches, 32 samples per batch, 281 batches per epoch, cosine decay, and early stopping patience 4.
 
 ## Diagnosis
 
-Diagnosis evaluates NEW training sessions A-R and validation sessions S-V.
-It does not evaluate W-Z.
+Diagnosis evaluates NEW training sessions A-R and validation sessions S-V. It does not evaluate W-Z.
 
 ```bash
 python dinov2/scripts/diagnose-dinov2.py \
@@ -158,8 +137,7 @@ python dinov2/scripts/diagnose-dinov2.py \
 
 ## Final test evaluation
 
-Following model selection, the finalized V12 checkpoint was evaluated on
-held-out sessions W-Z with:
+Following model selection, the finalized checkpoint was evaluated on held-out sessions W-Z with:
 
 ```bash
 python dinov2/scripts/evaluate-dinov2.py \
@@ -188,16 +166,11 @@ Confusion matrix (rows = true class, columns = predicted class):
 | `gesture_3` | 0 | 0 | 398 | 2 |
 | `no_gesture` | 25 | 41 | 26 | 708 |
 
-The largest test-set error category is `gesture_1` predicted as `no_gesture`
-(91 of 400 `gesture_1` images). The held-out test accuracy is close to the
-89.00% validation accuracy, but per-class performance differs. These results
-were obtained after V12 was finalized and should not be used to reselect or
-tune the checkpoint.
+The largest test-set error category is `gesture_1` predicted as `no_gesture` (91 of 400 `gesture_1` images). The held-out test accuracy is close to the 89.00% validation accuracy, but per-class performance differs. These results were obtained after finalization and should not be used to reselect or tune the checkpoint.
 
 ## ONNX export
 
-The exporter produces fixed-shape Opset-13 ONNX files and validates the graph
-with ONNX Runtime before finalizing the output.
+The exporter produces fixed-shape Opset-13 ONNX files and validates the graph with ONNX Runtime before finalizing the output.
 
 ```bash
 python dinov2/scripts/export-dinov2.py \
@@ -216,6 +189,4 @@ Embedding: [1, 384]
 Opset:     13
 ```
 
-Export-time compatibility changes do not modify the checkpoint or require
-retraining. Resize conversion is not recommended because changing DINOv2's
-positional-embedding interpolation caused a significant numerical deviation.
+Export-time compatibility changes do not modify the checkpoint or require retraining. Resize conversion is not recommended because changing DINOv2's positional-embedding interpolation caused a significant numerical deviation.
