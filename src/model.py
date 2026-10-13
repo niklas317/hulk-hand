@@ -550,9 +550,9 @@ class HulkHandDinoV2(nn.Module):
 
         Frozen backbone parts remain in eval mode.
 
-        During training only:
+        During V11/V12 training only:
 
-            blocks 10-11
+            the configured final transformer blocks
             final backbone norm
             classifier
 
@@ -893,11 +893,6 @@ def main() -> None:
     )
 
     print(
-        "Trainable blocks: "
-        f"{', '.join(str(index) for index in model.trainable_block_indices)}"
-    )
-
-    print(
         "Final norm:       "
         "trainable"
     )
@@ -918,6 +913,11 @@ def main() -> None:
         num_classes=args.num_classes,
         pretrained=True,
         num_trainable_blocks=NUM_TRAINABLE_BLOCKS,
+    )
+
+    print(
+        "Trainable blocks: "
+        f"{', '.join(str(index) for index in model.trainable_block_indices)}"
     )
 
     model.to(

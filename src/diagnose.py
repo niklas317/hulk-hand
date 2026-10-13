@@ -23,7 +23,10 @@ from model import (
 )
 
 
-EXPECTED_MODEL_ID = "dinov2_vits14_v11_layerwise_decay_last10_opset13"
+EXPECTED_MODEL_IDS = {
+    "dinov2_vits14_v11_layerwise_decay_last10_opset13",
+    "dinov2_vits14_v12_new_only_opset13",
+}
 
 VALIDATION_SESSIONS = (
     "S",
@@ -109,11 +112,11 @@ def validate_checkpoint(
         "model_id"
     )
 
-    if model_id != EXPECTED_MODEL_ID:
+    if model_id not in EXPECTED_MODEL_IDS:
 
         raise RuntimeError(
             "Checkpoint belongs to a different model.\n"
-            f"Expected: {EXPECTED_MODEL_ID}\n"
+            f"Expected one of: {sorted(EXPECTED_MODEL_IDS)}\n"
             f"Actual:   {model_id}"
         )
 
@@ -601,7 +604,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Diagnose the DINOv2 V11 best.pt "
+            "Diagnose a compatible DINOv2 best.pt "
             "on NEW train A-R and NEW validation S-V."
         )
     )
@@ -620,7 +623,7 @@ def main() -> None:
         type=Path,
         required=True,
         help=(
-            "Path to the V11 best.pt."
+            "Path to a compatible best.pt."
         ),
     )
 
@@ -839,7 +842,7 @@ def main() -> None:
 
     print()
     print(
-        "Building DINOv2 V11 architecture..."
+        "Building DINOv2 architecture..."
     )
     print()
 
@@ -867,7 +870,7 @@ def main() -> None:
 
     print()
     print(
-        "hulk-hand DINOv2 V11 diagnosis"
+        "hulk-hand DINOv2 diagnosis"
     )
     print(
         "============================="

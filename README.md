@@ -102,6 +102,10 @@ remain untouched.
 
 They must not be used while continuing model development.
 
+V12 changes the development objective: training uses only the NEW custom
+recordings, with a target of approximately 90% accuracy on the unseen
+validation sessions S-V. OLD/HaGRID data is not loaded by the V12 entry point.
+
 ---
 
 # Quick command reference
@@ -230,6 +234,42 @@ python src/train.py \
 Resume must only be used to continue the same experiment.
 
 Do not resume V6 when starting V11 or another independent experiment.
+
+## 6. Start V12 with NEW data only
+
+V12 can be started with the dedicated entry point:
+
+```bash
+python src/train_v12.py \
+    --data-dir /path/to/Dataset \
+    --output-dir checkpoints/training/v12 \
+    --horizontal-flip
+```
+
+V12 uses only NEW sessions A-R for training and S-V for validation. It uses a
+class-balanced batch sampler with 32 images per batch, 8 images per class,
+and 281 batches per epoch. The final sessions W-Z remain untouched.
+
+To resume V12:
+
+```bash
+python src/train_v12.py \
+    --data-dir /path/to/Dataset \
+    --output-dir checkpoints/training/v12 \
+    --resume checkpoints/training/v12/last.pt \
+    --horizontal-flip
+```
+
+V12 checkpoints use a separate model identifier and cannot be confused with
+V11 checkpoints.
+
+V12 diagnosis uses the same unseen-session analysis:
+
+```bash
+python src/diagnose_v12.py \
+    --data-dir /path/to/Dataset \
+    --checkpoint checkpoints/training/v12/best.pt
+```
 
 ## 6. Diagnose the current best V6 checkpoint
 

@@ -538,6 +538,50 @@ def build_datasets(
     )
 
 
+def build_new_only_datasets(
+    data_dir: Path,
+    image_size: int = 224,
+    horizontal_flip: bool = False,
+) -> tuple[
+    dict[str, GestureDataset],
+    list[str],
+    dict[str, int],
+]:
+    """Build V12 datasets without loading any OLD/HaGRID samples."""
+
+    data_dir = data_dir.expanduser().resolve()
+
+    if not data_dir.is_dir():
+        raise FileNotFoundError(
+            f"Dataset directory does not exist: {data_dir}"
+        )
+
+    classes, class_to_idx = discover_classes(data_dir)
+    train_transform = build_train_transform(
+        image_size=image_size,
+        horizontal_flip=horizontal_flip,
+    )
+    eval_transform = build_eval_transform(image_size=image_size)
+
+    new_train_samples = collect_new_samples(
+        data_dir, class_to_idx, split="train"
+    )
+    new_val_samples = collect_new_samples(
+        data_dir, class_to_idx, split="val"
+    )
+    new_test_samples = collect_new_samples(
+        data_dir, class_to_idx, split="test"
+    )
+
+    datasets = {
+        "new_train": GestureDataset(new_train_samples, train_transform),
+        "new_val": GestureDataset(new_val_samples, eval_transform),
+        "new_test": GestureDataset(new_test_samples, eval_transform),
+    }
+
+    return datasets, classes, class_to_idx
+
+
 # ---------------------------------------------------------------------------
 # Dataset inspection
 # ---------------------------------------------------------------------------

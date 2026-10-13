@@ -472,3 +472,82 @@ def build_training_dataset_and_sampler(
         combined_dataset,
         sampler,
     )
+
+
+class BalancedNewBatchSampler(Sampler[list[int]]):
+    """Class-balanced sampler for NEW-only V12 training."""
+
+    def __init__(
+        self,
+        dataset: GestureDataset,
+        batch_size: int = 32,
+        batches_per_epoch: int = 281,
+        seed: int = 42,
+    ) -> None:
+        if len(dataset) == 0:
+            raise ValueError("NEW training dataset is empty.")
+        if batch_size <= 0 or batches_per_epoch <= 0:
+            raise ValueError("Batch size and epoch length must be positive.")
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.batches_per_epoch = batches_per_epoch
+        self.seed = seed
+        self.epoch = 0
+        self.indices_by_class = self._group_indices_by_class(dataset)
+        self.class_labels = sorted(self.indices_by_class)
+
+        if not self.class_labels:
+            raise ValueError("No NEW classes found.")
+
+    @staticmethod
+    def _group_indices_by_class(
+        dataset: GestureDataset,
+    ) -> dict[int, list[int]]:
+        grouped: dict[int, list[int]] = defaultdict(list)
+        for index, sample in enumerate(dataset.samples):
+            grouped[sample.label].append(index)
+        return dict(grouped)
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("Epoch must be >= 0.")
+        self.epoch = epoch
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = random.Random(self.seed + self.epoch)
+        total = self.batch_size * self.batches_per_epoch
+        if self.batch_size % len(self.class_labels) != 0:
+            raise ValueError(
+                "NEW-only batch size must be divisible by the class count."
+            )
+
+        per_class = self.batch_size // len(self.class_labels)
+        sequences: dict[int, list[int]] = {}
+
+        for label in self.class_labels:
+            pool = list(self.indices_by_class[label])
+            sequence: list[int] = []
+            while len(sequence) < total // len(self.class_labels):
+                rng.shuffle(pool)
+                sequence.extend(pool)
+            sequences[label] = sequence[:total // len(self.class_labels)]
+
+        for batch_index in range(self.batches_per_epoch):
+            batch: list[int] = []
+            for label in self.class_labels:
+                start = batch_index * per_class
+                batch.extend(sequences[label][start:start + per_class])
+            rng.shuffle(batch)
+            yield batch
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch
+
+
+def build_new_only_dataset_and_sampler(
+    new_train: GestureDataset,
+    seed: int = 42,
+) -> tuple[GestureDataset, BalancedNewBatchSampler]:
+    sampler = BalancedNewBatchSampler(new_train, seed=seed)
+    return new_train, sampler

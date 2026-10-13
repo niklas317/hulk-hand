@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import build_datasets
+from dataset import build_new_only_datasets
 from model import (
     DINOV2_MODEL,
     EMBEDDING_DIM,
@@ -32,6 +33,7 @@ from sampler import (
     BATCHES_PER_EPOCH,
     SAMPLES_PER_EPOCH,
     build_training_dataset_and_sampler,
+    build_new_only_dataset_and_sampler,
 )
 
 
@@ -1097,7 +1099,7 @@ def print_training_header(
 
     print()
     print(
-        "hulk-hand DINOv2 V11 training"
+        f"hulk-hand DINOv2 {MODEL_ID} training"
     )
     print(
         "============================"
@@ -1190,13 +1192,9 @@ def print_training_header(
 
     print()
 
-    print(
-        f"OLD train:           {len(datasets['old_train'])}"
-    )
-
-    print(
-        f"OLD val:             {len(datasets['old_val'])}"
-    )
+    if "old_train" in datasets:
+        print(f"OLD train:           {len(datasets['old_train'])}")
+        print(f"OLD val:             {len(datasets['old_val'])}")
 
     print(
         f"NEW train:           {len(datasets['new_train'])}"
@@ -1281,10 +1279,14 @@ def print_training_header(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global MODEL_ID
+    global SOURCE_SPLIT
+    global BATCHES_PER_EPOCH
+    global SAMPLES_PER_EPOCH
 
     parser = argparse.ArgumentParser(
         description=(
-            "V11 layerwise-decay fine-tuning of the "
+            "Layerwise-decay fine-tuning of the "
             "last ten DINOv2 ViT-S/14 transformer "
             "blocks for hulk-hand."
         )
@@ -1313,7 +1315,7 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Resume training from a V11 last.pt."
+            "Resume training from a matching last.pt."
         ),
     )
 
@@ -1343,7 +1345,19 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--new-only",
+        action="store_true",
+        help="V12 mode: train only on NEW sessions; no OLD data is loaded.",
+    )
+
     args = parser.parse_args()
+
+    if args.new_only:
+        MODEL_ID = "dinov2_vits14_v12_new_only_opset13"
+        SOURCE_SPLIT = "100% NEW"
+        BATCHES_PER_EPOCH = 281
+        SAMPLES_PER_EPOCH = BATCH_SIZE * BATCHES_PER_EPOCH
 
     if args.num_workers < 0:
 
@@ -1411,51 +1425,29 @@ def main() -> None:
     # Dataset
     # ------------------------------------------------------------------
 
-    (
-        datasets,
-        classes,
-        class_to_idx,
-    ) = build_datasets(
-        data_dir=data_dir,
-        image_size=224,
-        horizontal_flip=(
-            args.horizontal_flip
-        ),
-        old_val_fraction=0.10,
-        seed=args.seed,
-    )
+    if args.new_only:
+        datasets, classes, class_to_idx = build_new_only_datasets(
+            data_dir=data_dir,
+            image_size=224,
+            horizontal_flip=args.horizontal_flip,
+        )
+    else:
+        datasets, classes, class_to_idx = build_datasets(
+            data_dir=data_dir,
+            image_size=224,
+            horizontal_flip=args.horizontal_flip,
+            old_val_fraction=0.10,
+            seed=args.seed,
+        )
 
-    old_train = datasets[
-        "old_train"
-    ]
-
-    new_train = datasets[
-        "new_train"
-    ]
-
-    old_val = datasets[
-        "old_val"
-    ]
-
-    new_val = datasets[
-        "new_val"
-    ]
+    new_train = datasets["new_train"]
+    new_val = datasets["new_val"]
 
     # W-Z remain untouched.
-
-    if len(old_train) == 0:
-        raise RuntimeError(
-            "OLD training dataset is empty."
-        )
 
     if len(new_train) == 0:
         raise RuntimeError(
             "NEW training dataset is empty."
-        )
-
-    if len(old_val) == 0:
-        raise RuntimeError(
-            "OLD validation dataset is empty."
         )
 
     if len(new_val) == 0:
@@ -1463,21 +1455,25 @@ def main() -> None:
             "NEW validation dataset is empty."
         )
 
-    combined_train, batch_sampler = (
-        build_training_dataset_and_sampler(
+    if args.new_only:
+        combined_train, batch_sampler = build_new_only_dataset_and_sampler(
+            new_train=new_train,
+            seed=args.seed,
+        )
+        old_val_loader = None
+    else:
+        old_train = datasets["old_train"]
+        old_val = datasets["old_val"]
+        combined_train, batch_sampler = build_training_dataset_and_sampler(
             old_train=old_train,
             new_train=new_train,
             seed=args.seed,
         )
-    )
-
-    old_val_loader = (
-        build_validation_loader(
+        old_val_loader = build_validation_loader(
             old_val,
             num_workers=args.num_workers,
             pin_memory=pin_memory,
         )
-    )
 
     new_val_loader = (
         build_validation_loader(
@@ -1729,19 +1725,18 @@ def main() -> None:
         # Validation
         # --------------------------------------------------------------
 
-        (
-            old_val_loss,
-            old_val_accuracy,
-        ) = evaluate(
-            model=model,
-            loader=old_val_loader,
-            criterion=criterion,
-            device=device,
-            epoch=epoch,
-            description=(
-                f"Epoch {epoch:02d} OLD val"
-            ),
-        )
+        if old_val_loader is not None:
+            old_val_loss, old_val_accuracy = evaluate(
+                model=model,
+                loader=old_val_loader,
+                criterion=criterion,
+                device=device,
+                epoch=epoch,
+                description=f"Epoch {epoch:02d} OLD val",
+            )
+        else:
+            old_val_loss = 0.0
+            old_val_accuracy = 0.0
 
         (
             new_val_loss,
@@ -1799,15 +1794,16 @@ def main() -> None:
             f"{train_accuracy * 100:.2f}%"
         )
 
-        print(
-            f"  OLD val loss:     "
-            f"{old_val_loss:.4f}"
-        )
+        if old_val_loader is not None:
+            print(
+                f"  OLD val loss:     "
+                f"{old_val_loss:.4f}"
+            )
 
-        print(
-            f"  OLD val accuracy: "
-            f"{old_val_accuracy * 100:.2f}%"
-        )
+            print(
+                f"  OLD val accuracy: "
+                f"{old_val_accuracy * 100:.2f}%"
+            )
 
         print(
             f"  NEW val loss:     "
