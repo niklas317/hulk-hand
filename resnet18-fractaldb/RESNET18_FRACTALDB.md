@@ -60,6 +60,28 @@ python3 resnet18-fractaldb/scripts/train-resnet18-fractaldb.py \
   --resume /path/to/checkpoints/resnet18-fractaldb/last.pt
 ```
 
+## Diagnosis
+
+Evaluate the validation sessions `S-V`:
+
+```bash
+python3 resnet18-fractaldb/scripts/diagnose-resnet18-fractaldb.py \
+  --data-dir /path/to/private/Dataset \
+  --checkpoint /path/to/checkpoints/resnet18-fractaldb/best.pt \
+  --split validation
+```
+
+The report includes overall, per-class, and per-session accuracy plus a
+confusion matrix. After model selection, evaluate the untouched test sessions
+`W-Z` once with:
+
+```bash
+python3 resnet18-fractaldb/scripts/diagnose-resnet18-fractaldb.py \
+  --data-dir /path/to/private/Dataset \
+  --checkpoint /path/to/checkpoints/resnet18-fractaldb/best.pt \
+  --split test
+```
+
 ## Outputs
 
 The model returns:
