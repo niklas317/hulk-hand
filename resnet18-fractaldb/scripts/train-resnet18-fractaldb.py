@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Train a from-scratch ResNet18 on the private NEW session split.
+"""Fine-tune a FractalDB-pretrained ResNet18 on the private NEW session split.
 
-This pipeline intentionally does not load the HaGRID checkpoint.  It keeps the
-ResNet18 input preprocessing, while using the DINOv2 pipeline's NEW-only
+This pipeline loads a FractalDB-pretrained ResNet18, keeps the exact ResNet-HaGRID
+preprocessing, and uses the DINOv2 pipeline's NEW-only
 session split, balanced batches, warmup/cosine schedule, and early stopping.
 """
 
@@ -33,6 +33,7 @@ from gesture_preprocessing import PreprocessConfig, build_eval_transform, build_
 
 
 CLASS_NAMES = ["gesture_1", "gesture_2", "gesture_3", "no_gesture"]
+FRACTALDB_MODEL_ID = "totti0223/resnet18_fractaldb_10000"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 TRAIN_SESSIONS = tuple(chr(code) for code in range(ord("A"), ord("R") + 1))
 VAL_SESSIONS = tuple(chr(code) for code in range(ord("S"), ord("V") + 1))
@@ -43,8 +44,8 @@ BATCHES_PER_EPOCH = 281
 MAX_EPOCHS = 40
 WARMUP_EPOCHS = 3
 WARMUP_START_FACTOR = 0.10
-BACKBONE_LR = 2.5e-6
-CLASSIFIER_LR = 2e-4
+BACKBONE_LR = 1e-4
+CLASSIFIER_LR = 1e-3
 WEIGHT_DECAY = 1e-4
 LABEL_SMOOTHING = 0.05
 GRADIENT_CLIP_NORM = 1.0
@@ -163,11 +164,9 @@ def set_seed(seed: int) -> None:
 def build_optimizer(model: ResNet18WithEmbedding) -> AdamW:
     return AdamW(
         [
-            {"params": model.backbone.layer1.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.layer2.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.layer3.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.layer4.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
-            {"params": list(model.backbone.conv1.parameters()) + list(model.backbone.bn1.parameters()), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.fc.parameters(), "lr": CLASSIFIER_LR, "name": "classifier"},
         ],
         weight_decay=WEIGHT_DECAY,
@@ -187,6 +186,9 @@ def build_scheduler(optimizer: AdamW) -> SequentialLR:
 
 def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool) -> tuple[float, float]:
     model.train(training)
+    if training:
+        model.backbone.bn1.eval()
+        model.backbone.layer1.eval()
     total_loss = total_correct = total_samples = 0
     phase = "train" if training else "val"
     progress = tqdm(
@@ -255,10 +257,45 @@ def save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, best_ac
     )
 
 
+def load_fractaldb_backbone(model: ResNet18WithEmbedding) -> None:
+    try:
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+    except ImportError as exc:
+        raise RuntimeError(
+            "FractalDB loading requires huggingface-hub and safetensors. "
+            "Install resnet18-fractaldb/requirements.txt."
+        ) from exc
+
+    checkpoint_path = hf_hub_download(
+        repo_id=FRACTALDB_MODEL_ID,
+        filename="model.safetensors",
+    )
+    state_dict = load_file(checkpoint_path, device="cpu")
+    normalized = {}
+    for key, tensor in state_dict.items():
+        key = key.removeprefix("model.")
+        if key.startswith("fc."):
+            continue
+        normalized[key] = tensor
+    missing, unexpected = model.backbone.load_state_dict(normalized, strict=False)
+    if set(missing) != {"fc.weight", "fc.bias"} or unexpected:
+        raise RuntimeError(
+            "FractalDB checkpoint did not match torchvision ResNet18. "
+            f"Missing: {missing}; unexpected: {unexpected}"
+        )
+
+
+def freeze_first_stage(model: ResNet18WithEmbedding) -> None:
+    for module in (model.backbone.conv1, model.backbone.bn1, model.backbone.layer1):
+        for parameter in module.parameters():
+            parameter.requires_grad = False
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a from-scratch ResNet18 on private NEW sessions.")
+    parser = argparse.ArgumentParser(description="Fine-tune a FractalDB-pretrained ResNet18 on private NEW sessions.")
     parser.add_argument("--data-dir", type=Path, required=True, help="Private dataset containing class/session directories")
-    parser.add_argument("--output-dir", type=Path, default=PIPELINE_ROOT / "artifacts" / "runs" / "resnet18-custom")
+    parser.add_argument("--output-dir", type=Path, default=PIPELINE_ROOT / "artifacts" / "runs" / "resnet18-fractaldb")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--resume", type=Path, default=None, help="Optional matching last.pt checkpoint")
@@ -280,18 +317,21 @@ def main() -> None:
     sampler = BalancedBatchSampler(train_dataset, args.seed)
     train_loader = DataLoader(train_dataset, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
-    model = ResNet18WithEmbedding(len(CLASS_NAMES)).to(device)
+    model = ResNet18WithEmbedding(len(CLASS_NAMES))
+    load_fractaldb_backbone(model)
+    freeze_first_stage(model)
+    model.to(device)
     optimizer = build_optimizer(model)
     scheduler = build_scheduler(optimizer)
     start_epoch = 1
     best_accuracy = float("-inf")
     stopping_counter = 0
-    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, "random ResNet18 weights (weights=None)", "resnet18-custom/preprocessing/gesture_preprocessing.py")
+    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}) with conv1+bn1+layer1 frozen", "resnet18-fractaldb/preprocessing/gesture_preprocessing.py")
 
     if args.resume:
         checkpoint = torch.load(args.resume.expanduser().resolve(), map_location=device)
         if checkpoint.get("training_config", {}).get("initialization") != config.initialization:
-            raise ValueError("Resume checkpoint is not a from-scratch custom ResNet18 checkpoint.")
+            raise ValueError("Resume checkpoint is not a matching FractalDB ResNet18 checkpoint.")
         if checkpoint.get("classes") != CLASS_NAMES:
             raise ValueError(
                 "Resume checkpoint has incompatible class names; expected "
@@ -305,7 +345,7 @@ def main() -> None:
         stopping_counter = int(checkpoint["early_stopping_counter"])
 
     criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    print(f"Training from scratch on NEW sessions A-R; device={device}; train={len(train_dataset)}; val={len(val_dataset)}")
+    print(f"Training FractalDB ResNet18 on NEW sessions A-R; device={device}; train={len(train_dataset)}; val={len(val_dataset)}")
     for epoch in range(start_epoch, MAX_EPOCHS + 1):
         sampler.set_epoch(epoch - 1)
         train_loss, train_accuracy = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True)

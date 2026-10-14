@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a custom from-scratch ResNet18 to ONNX and optional TFLite."""
+"""Export the FractalDB-initialized ResNet18 to dual-output ONNX and optional TFLite."""
 
 from __future__ import annotations
 
@@ -272,12 +272,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export trained 4-class ResNet18 to ONNX opset 13 and optionally TFLite")
     parser.add_argument(
         "--checkpoint",
-        default="resnet18-custom/artifacts/runs/resnet18-custom/best.pt",
+        default="resnet18-fractaldb/artifacts/runs/resnet18-fractaldb/best.pt",
         help="Best trained checkpoint path, relative to the repository root by default",
     )
     parser.add_argument(
         "--output-dir",
-        default="resnet18-custom/artifacts/export",
+        default="resnet18-fractaldb/artifacts/export",
         help="Output directory for ONNX/TFLite artifacts, relative to the repository root by default",
     )
     parser.add_argument("--onnx-name", default="ResNet18_4class_opset13_dual_output.onnx")
@@ -292,8 +292,8 @@ def main() -> None:
     parser.add_argument("--skip-onnx-check", action="store_true", help="Skip optional ONNX checker")
     args = parser.parse_args()
 
-    checkpoint_path = resolve_repo_path(args.checkpoint, REPO_ROOT / "resnet18-custom" / "artifacts" / "runs" / "resnet18-custom" / "best.pt")
-    output_dir = resolve_repo_path(args.output_dir, REPO_ROOT / "resnet18-custom" / "artifacts" / "export")
+    checkpoint_path = resolve_repo_path(args.checkpoint, REPO_ROOT / "resnet18-fractaldb" / "artifacts" / "runs" / "resnet18-fractaldb" / "best.pt")
+    output_dir = resolve_repo_path(args.output_dir, REPO_ROOT / "resnet18-fractaldb" / "artifacts" / "export")
     onnx_path = output_dir / args.onnx_name
     saved_model_dir = output_dir / args.saved_model_name
     tflite_path = output_dir / args.tflite_name

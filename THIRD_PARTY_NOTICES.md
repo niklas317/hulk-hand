@@ -83,3 +83,16 @@ This covers the fine-tuned PyTorch checkpoint and its corresponding exported for
 Recipients may use, modify, and redistribute these artifacts, including in commercial and proprietary products, under the terms of Apache License 2.0. Redistributors must provide a copy of the applicable Apache 2.0 license, retain applicable copyright and attribution notices, identify modifications as required by the license, and carry forward relevant upstream `NOTICE` contents if any were provided.
 
 Neither Meta Platforms, Inc. nor the upstream DINOv2 authors endorse this project.
+
+## FractalDB (ResNet18-FractalDB pipeline)
+
+The ResNet18-FractalDB pipeline initializes its backbone from:
+
+- Hugging Face model: https://huggingface.co/totti0223/resnet18_fractaldb_10000
+- Original FractalDB project: https://github.com/hirokatsukataoka16/FractalDB-Pretrained-ResNet-PyTorch
+- Paper project page: https://hirokatsukataoka16.github.io/Pretraining-without-Natural-Images/
+- License identified by the uploader: **MIT License**
+
+The checkpoint is downloaded at training time and is not included in this repository. Its original 10,000-class classifier is discarded; the ResNet18 backbone is adapted for the four private gesture classes. The first ResNet stage (`conv1`, `bn1`, and `layer1`) remains frozen during fine-tuning.
+
+The custom gesture dataset is private and is not distributed in this repository or its model releases.

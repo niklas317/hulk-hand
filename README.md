@@ -4,8 +4,7 @@
 pipelines:
 
 - [ResNet18-HaGRID](resnet18-hagrid/RESNET18.md) — the completed legacy pipeline.
-- [ResNet18-Custom](resnet18-custom/RESNET18_CUSTOM.md) — from-scratch training on private NEW sessions.
-- [ResNet152-Custom Layer3](resnet152-custom-layer3/RESNET152_CUSTOM.md) — ResNet152 with a 1024-dimensional layer3 output.
+- [ResNet18-FractalDB](resnet18-fractaldb/RESNET18_FRACTALDB.md) — FractalDB-initialized training on private NEW sessions.
 - [ResNet152-Custom Layer4](resnet152-custom-layer4/RESNET152_CUSTOM.md) — ResNet152 with its native 2048-dimensional layer4 output.
 - [DINOv2](dinov2/DINOv2.md) — the completed legacy pipeline.
 
@@ -14,8 +13,7 @@ Both models use `[batch, 3, 224, 224]` inputs and produce four-class logits, but
 | Model | Embedding | Status |
 |---|---:|---|
 | ResNet18-HaGRID | `[batch, 512]` | Completed legacy pipeline |
-| ResNet18-Custom | `[batch, 512]` | Private NEW-only training pipeline |
-| ResNet152-Custom Layer3 | `[batch, 1024]` | Private NEW-only training pipeline |
+| ResNet18-FractalDB | `[batch, 512]` | FractalDB-initialized private NEW-only pipeline |
 | ResNet152-Custom Layer4 | `[batch, 2048]` | Private NEW-only training pipeline |
 | DINOv2 | `[batch, 384]` | Completed |
 
@@ -30,7 +28,7 @@ Download a compatible ONNX model from the [project releases](https://github.com/
 python3 demo/webcam-viewer.py \
   --camera /dev/video0 \
   --model /path/to/model.onnx \
-  --preprocessing <resnet18|resnet18-custom|resnet152-custom-layer3|resnet152-custom-layer4|dinov2>
+  --preprocessing <resnet18|resnet18-fractaldb|resnet152-custom-layer4|dinov2>
 ```
 
 The `--preprocessing` value must match the model: ResNet18 and DINOv2 use different normalization parameters. The default labels are `one`, `two`, `stop`, and `no_gesture`; use `--class-names` or `--class-file` if the artifact uses different labels.

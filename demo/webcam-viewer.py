@@ -65,8 +65,7 @@ def preprocess_frame(
     """Apply the selected model's preprocessing to one OpenCV frame."""
     if preprocessing in (
         "resnet18",
-        "resnet18-custom",
-        "resnet152-custom-layer3",
+        "resnet18-fractaldb",
         "resnet152-custom-layer4",
     ):
         return preprocess_bgr_frame(
@@ -115,8 +114,7 @@ def main() -> None:
         required=True,
         choices=(
             "resnet18",
-            "resnet18-custom",
-            "resnet152-custom-layer3",
+            "resnet18-fractaldb",
             "resnet152-custom-layer4",
             "dinov2",
         ),

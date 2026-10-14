@@ -1,6 +1,6 @@
 # Custom ResNet152 Layer4 Gesture Model
 
-This pipeline mirrors `resnet18-custom` but uses a ResNet152 backbone and
+This pipeline mirrors the private-session ResNet pipeline but uses a ResNet152 backbone and
 trains from random initialization and does not load HaGRID or any other
 starting checkpoint.
 
