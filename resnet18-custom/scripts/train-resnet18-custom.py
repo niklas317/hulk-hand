@@ -23,6 +23,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision.models import resnet18
 from PIL import Image
+from tqdm import tqdm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PIPELINE_ROOT = SCRIPT_DIR.parent
@@ -187,7 +188,14 @@ def build_scheduler(optimizer: AdamW) -> SequentialLR:
 def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool) -> tuple[float, float]:
     model.train(training)
     total_loss = total_correct = total_samples = 0
-    for batch_index, batch in enumerate(loader, 1):
+    phase = "train" if training else "val"
+    progress = tqdm(
+        loader,
+        total=len(loader),
+        desc=f"Epoch {epoch:02d} {phase}",
+        leave=False,
+    )
+    for batch_index, batch in enumerate(progress, 1):
         images = batch["image"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
         if training:
@@ -205,6 +213,10 @@ def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training:
         total_loss += loss.detach().item() * count
         total_correct += int(logits.argmax(1).eq(labels).sum())
         total_samples += count
+        progress.set_postfix(
+            loss=f"{total_loss / total_samples:.4f}",
+            acc=f"{total_correct / total_samples * 100:.2f}%",
+        )
     if not total_samples:
         raise RuntimeError("DataLoader produced no samples.")
     return total_loss / total_samples, total_correct / total_samples
