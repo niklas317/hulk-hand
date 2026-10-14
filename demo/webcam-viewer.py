@@ -66,6 +66,7 @@ def preprocess_frame(
     if preprocessing in (
         "resnet18",
         "resnet18-fractaldb",
+        "resnet34-fractaldb",
         "resnet152-custom-layer4",
     ):
         return preprocess_bgr_frame(
@@ -115,6 +116,7 @@ def main() -> None:
         choices=(
             "resnet18",
             "resnet18-fractaldb",
+            "resnet34-fractaldb",
             "resnet152-custom-layer4",
             "dinov2",
         ),

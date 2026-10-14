@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fine-tune a FractalDB-pretrained ResNet18 on the private NEW session split.
 
-This pipeline loads a FractalDB-pretrained ResNet18, keeps the exact ResNet-HaGRID
+This pipeline loads a FractalDB-pretrained ResNet18, uses FractalDB/ImageNet
 preprocessing, and uses the DINOv2 pipeline's NEW-only
 session split, balanced batches, warmup/cosine schedule, and early stopping.
 """
