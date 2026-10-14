@@ -30,13 +30,16 @@ reserved for final testing. Other directories are ignored.
 
 ## Preprocessing
 
-This pipeline uses the exact preprocessing from `resnet18-hagrid`:
+This pipeline uses the FractalDB model-card preprocessing rather than the
+HaGRID normalization:
 
 - RGB conversion
-- Aspect-ratio-preserving 224x224 letterboxing
-- ResNet-HaGRID fill color
-- ResNet-HaGRID normalization
-- Existing ResNet training augmentations
+- Resize to 224x224
+- ImageNet normalization: mean `(0.485, 0.456, 0.406)`
+- ImageNet normalization: std `(0.229, 0.224, 0.225)`
+- Existing private-session training augmentations
+
+The `resnet18-hagrid` preprocessing remains unchanged.
 
 ## Training
 

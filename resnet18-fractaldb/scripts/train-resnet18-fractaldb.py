@@ -29,7 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PIPELINE_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = PIPELINE_ROOT.parent
 sys.path.insert(0, str(PIPELINE_ROOT / "preprocessing"))
-from gesture_preprocessing import PreprocessConfig, build_eval_transform, build_train_transform
+from fractaldb_preprocessing import PreprocessConfig, build_eval_transform, build_train_transform
 
 
 CLASS_NAMES = ["gesture_1", "gesture_2", "gesture_3", "no_gesture"]
@@ -326,7 +326,7 @@ def main() -> None:
     start_epoch = 1
     best_accuracy = float("-inf")
     stopping_counter = 0
-    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}) with layer1 frozen", "resnet18-fractaldb/preprocessing/gesture_preprocessing.py")
+    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}) with layer1 frozen", "resnet18-fractaldb/preprocessing/fractaldb_preprocessing.py")
 
     if args.resume:
         checkpoint = torch.load(args.resume.expanduser().resolve(), map_location=device)
