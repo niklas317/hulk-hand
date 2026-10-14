@@ -272,12 +272,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export trained 4-class ResNet18 to ONNX opset 13 and optionally TFLite")
     parser.add_argument(
         "--checkpoint",
-        default="resnet18/artifacts/ResNet18_finetuned.pth",
+        default="resnet18-hagrid/artifacts/ResNet18_finetuned.pth",
         help="Best trained checkpoint path, relative to the repository root by default",
     )
     parser.add_argument(
         "--output-dir",
-        default="resnet18/artifacts/export",
+        default="resnet18-hagrid/artifacts/export",
         help="Output directory for ONNX/TFLite artifacts, relative to the repository root by default",
     )
     parser.add_argument("--onnx-name", default="ResNet18_4class_opset13_dual_output.onnx")
@@ -292,8 +292,8 @@ def main() -> None:
     parser.add_argument("--skip-onnx-check", action="store_true", help="Skip optional ONNX checker")
     args = parser.parse_args()
 
-    checkpoint_path = resolve_repo_path(args.checkpoint, REPO_ROOT / "resnet18" / "artifacts" / "ResNet18_finetuned.pth")
-    output_dir = resolve_repo_path(args.output_dir, REPO_ROOT / "resnet18" / "artifacts" / "export")
+    checkpoint_path = resolve_repo_path(args.checkpoint, REPO_ROOT / "resnet18-hagrid" / "artifacts" / "ResNet18_finetuned.pth")
+    output_dir = resolve_repo_path(args.output_dir, REPO_ROOT / "resnet18-hagrid" / "artifacts" / "export")
     onnx_path = output_dir / args.onnx_name
     saved_model_dir = output_dir / args.saved_model_name
     tflite_path = output_dir / args.tflite_name

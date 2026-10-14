@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "resnet18" / "preprocessing"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "resnet18-hagrid" / "preprocessing"))
 from gesture_preprocessing import PreprocessConfig, preprocess_bgr_frame
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dinov2" / "preprocessing"))
@@ -63,7 +63,7 @@ def preprocess_frame(
     image_size: int = 224,
 ) -> np.ndarray:
     """Apply the selected model's preprocessing to one OpenCV frame."""
-    if preprocessing == "resnet18":
+    if preprocessing in ("resnet18", "resnet18-custom"):
         return preprocess_bgr_frame(
             frame,
             PreprocessConfig(image_size=image_size),
@@ -108,7 +108,7 @@ def main() -> None:
     parser.add_argument(
         "--preprocessing",
         required=True,
-        choices=("resnet18", "dinov2"),
+        choices=("resnet18", "resnet18-custom", "dinov2"),
         help="Preprocessing pipeline matching the selected model.",
     )
     parser.add_argument("--class-names", default=None, help="Comma-separated label list for model outputs")

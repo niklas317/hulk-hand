@@ -17,12 +17,12 @@ The gesture definitions describe the intended labels, not a claim that every pos
 
 The base model is the 34-class HaGRID ResNet18 checkpoint downloaded from the URL below. The final fully connected layer is replaced with a four-output classifier. `scripts/train-resnet18.py` supports both full fine-tuning and classifier-only training with `--freeze-backbone`.
 
-Download the base checkpoint into `resnet18/artifacts/`:
+Download the base checkpoint into `resnet18-hagrid/artifacts/`:
 
 ```bash
-mkdir -p resnet18/artifacts
+mkdir -p resnet18-hagrid/artifacts
 curl -L "https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/ResNet18.pth" \
-  -o resnet18/artifacts/ResNet18.pth
+  -o resnet18-hagrid/artifacts/ResNet18.pth
 ```
 
 The direct training pipeline:
@@ -33,7 +33,7 @@ The direct training pipeline:
 4. Letterboxes images to 224x224, converts them to RGB tensors, and applies the configured normalization.
 5. Uses AdamW, warmup, cosine learning-rate decay, optional label smoothing, optional class weighting, and optional CUDA AMP.
 
-The default output is `resnet18/artifacts/runs/resnet18/`. The best validation checkpoint is saved as `ResNet18_finetuned.pth`, alongside `class_names.txt` and `training_config.json`.
+The default output is `resnet18-hagrid/artifacts/runs/resnet18/`. The best validation checkpoint is saved as `ResNet18_finetuned.pth`, alongside `class_names.txt` and `training_config.json`.
 
 ## Input And Outputs
 
@@ -51,7 +51,7 @@ Validation accuracy from an internal split is not an independent test result. Pe
 ## Training Command
 
 ```bash
-python3 resnet18/scripts/train-resnet18.py \
+python3 resnet18-hagrid/scripts/train-resnet18.py \
   --train-root /path/to/dataset \
   --epochs 40 \
   --batch-size 64 \
@@ -61,11 +61,11 @@ python3 resnet18/scripts/train-resnet18.py \
 ## Export
 
 ```bash
-python3 resnet18/scripts/export-resnet18.py \
-  --checkpoint resnet18/artifacts/runs/resnet18/ResNet18_finetuned.pth \
-  --output-dir resnet18/artifacts/export
-python3 resnet18/scripts/check-onnx-opset.py \
-  resnet18/artifacts/export/ResNet18_4class_opset13_dual_output.onnx \
+python3 resnet18-hagrid/scripts/export-resnet18.py \
+  --checkpoint resnet18-hagrid/artifacts/runs/resnet18/ResNet18_finetuned.pth \
+  --output-dir resnet18-hagrid/artifacts/export
+python3 resnet18-hagrid/scripts/check-onnx-opset.py \
+  resnet18-hagrid/artifacts/export/ResNet18_4class_opset13_dual_output.onnx \
   --expect 13
 ```
 

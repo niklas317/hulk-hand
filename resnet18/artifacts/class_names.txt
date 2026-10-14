@@ -1,4 +1,0 @@
-one
-two
-stop
-no_gesture
