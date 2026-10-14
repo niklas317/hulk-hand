@@ -8,9 +8,10 @@ totti0223/resnet18_fractaldb_10000
 ```
 
 The original 10,000-class FractalDB classifier is discarded and replaced with
-the four gesture classes. The ResNet stem and first residual stage are frozen:
-`conv1`, `bn1`, and `layer1`. `layer2`, `layer3`, `layer4`, and the new
-classifier remain trainable.
+the four gesture classes. Only the first residual stage, `layer1`, is frozen.
+The stem (`conv1` and `bn1`), `layer2`, `layer3`, `layer4`, and the new
+classifier remain trainable so the backbone can adapt to the exact
+ResNet-HaGRID preprocessing.
 
 ## Dataset
 

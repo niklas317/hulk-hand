@@ -93,6 +93,6 @@ The ResNet18-FractalDB pipeline initializes its backbone from:
 - Paper project page: https://hirokatsukataoka16.github.io/Pretraining-without-Natural-Images/
 - License identified by the uploader: **MIT License**
 
-The checkpoint is downloaded at training time and is not included in this repository. Its original 10,000-class classifier is discarded; the ResNet18 backbone is adapted for the four private gesture classes. The first ResNet stage (`conv1`, `bn1`, and `layer1`) remains frozen during fine-tuning.
+The checkpoint is downloaded at training time and is not included in this repository. Its original 10,000-class classifier is discarded; the ResNet18 backbone is adapted for the four private gesture classes. The first residual stage (`layer1`) remains frozen during fine-tuning, while the stem remains trainable to adapt to the repository's ResNet-HaGRID preprocessing.
 
 The custom gesture dataset is private and is not distributed in this repository or its model releases.

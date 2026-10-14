@@ -44,10 +44,10 @@ BATCHES_PER_EPOCH = 281
 MAX_EPOCHS = 40
 WARMUP_EPOCHS = 3
 WARMUP_START_FACTOR = 0.10
-BACKBONE_LR = 1e-4
-CLASSIFIER_LR = 1e-3
-WEIGHT_DECAY = 1e-4
-LABEL_SMOOTHING = 0.05
+BACKBONE_LR = 3e-5
+CLASSIFIER_LR = 3e-4
+WEIGHT_DECAY = 5e-4
+LABEL_SMOOTHING = 0.1
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 4
 
@@ -167,6 +167,8 @@ def build_optimizer(model: ResNet18WithEmbedding) -> AdamW:
             {"params": model.backbone.layer2.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.layer3.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.layer4.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
+            {"params": model.backbone.conv1.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
+            {"params": model.backbone.bn1.parameters(), "lr": BACKBONE_LR, "name": "backbone"},
             {"params": model.backbone.fc.parameters(), "lr": CLASSIFIER_LR, "name": "classifier"},
         ],
         weight_decay=WEIGHT_DECAY,
@@ -187,7 +189,6 @@ def build_scheduler(optimizer: AdamW) -> SequentialLR:
 def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool) -> tuple[float, float]:
     model.train(training)
     if training:
-        model.backbone.bn1.eval()
         model.backbone.layer1.eval()
     total_loss = total_correct = total_samples = 0
     phase = "train" if training else "val"
@@ -287,9 +288,8 @@ def load_fractaldb_backbone(model: ResNet18WithEmbedding) -> None:
 
 
 def freeze_first_stage(model: ResNet18WithEmbedding) -> None:
-    for module in (model.backbone.conv1, model.backbone.bn1, model.backbone.layer1):
-        for parameter in module.parameters():
-            parameter.requires_grad = False
+    for parameter in model.backbone.layer1.parameters():
+        parameter.requires_grad = False
 
 
 def main() -> None:
@@ -326,7 +326,7 @@ def main() -> None:
     start_epoch = 1
     best_accuracy = float("-inf")
     stopping_counter = 0
-    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}) with conv1+bn1+layer1 frozen", "resnet18-fractaldb/preprocessing/gesture_preprocessing.py")
+    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}) with layer1 frozen", "resnet18-fractaldb/preprocessing/gesture_preprocessing.py")
 
     if args.resume:
         checkpoint = torch.load(args.resume.expanduser().resolve(), map_location=device)
