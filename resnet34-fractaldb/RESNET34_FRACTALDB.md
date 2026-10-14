@@ -33,12 +33,16 @@ This pipeline uses the FractalDB model-card preprocessing rather than the
 HaGRID normalization:
 
 - RGB conversion
-- Resize to 224x224
+- Aspect-ratio-preserving letterbox to 224x224 with the ResNet fill color
 - ImageNet normalization: mean `(0.485, 0.456, 0.406)`
 - ImageNet normalization: std `(0.229, 0.224, 0.225)`
 - Existing private-session training augmentations
 
 The `resnet18-hagrid` preprocessing remains unchanged.
+
+Training uses session-balanced class batches and staged fine-tuning: the new
+classifier trains first, `layer4` is then unfrozen, and the remaining trainable
+backbone stages are unfrozen later while `layer1` stays frozen.
 
 ## Training
 

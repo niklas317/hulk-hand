@@ -12,6 +12,7 @@ import argparse
 import json
 import random
 import sys
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
@@ -50,6 +51,9 @@ WEIGHT_DECAY = 5e-4
 LABEL_SMOOTHING = 0.1
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 4
+HEAD_ONLY_EPOCHS = 3
+LAYER4_START_EPOCH = HEAD_ONLY_EPOCHS + 1
+FULL_BACKBONE_START_EPOCH = 7
 
 
 @dataclass(frozen=True)
@@ -105,12 +109,27 @@ class BalancedBatchSampler(Sampler[list[int]]):
         sequences: dict[int, list[int]] = {}
         required = BATCHES_PER_EPOCH * per_class
         for label, source in self.grouped.items():
-            sequence: list[int] = []
-            while len(sequence) < required:
-                pool = list(source)
+            by_session: dict[str, list[int]] = defaultdict(list)
+            for index in source:
+                by_session[self.dataset.samples[index].session].append(index)
+            session_order = list(by_session)
+            cursors = {session: 0 for session in session_order}
+            for pool in by_session.values():
                 rng.shuffle(pool)
-                sequence.extend(pool)
-            sequences[label] = sequence[:required]
+            sequence = []
+            while len(sequence) < required:
+                rng.shuffle(session_order)
+                for session in session_order:
+                    pool = by_session[session]
+                    cursor = cursors[session]
+                    if cursor >= len(pool):
+                        rng.shuffle(pool)
+                        cursor = 0
+                    sequence.append(pool[cursor])
+                    cursors[session] = cursor + 1
+                    if len(sequence) == required:
+                        break
+            sequences[label] = sequence
         for batch_index in range(BATCHES_PER_EPOCH):
             batch = []
             start = batch_index * per_class
@@ -175,6 +194,24 @@ def build_optimizer(model: ResNet18WithEmbedding) -> AdamW:
     )
 
 
+def set_training_stage(model: ResNet18WithEmbedding, epoch: int) -> str:
+    """Progressively unfreeze the backbone while keeping layer1 frozen."""
+    layer4_trainable = epoch >= LAYER4_START_EPOCH
+    full_backbone_trainable = epoch >= FULL_BACKBONE_START_EPOCH
+    for parameter in model.backbone.layer1.parameters():
+        parameter.requires_grad = False
+    for module in (model.backbone.layer2, model.backbone.layer3, model.backbone.conv1, model.backbone.bn1):
+        for parameter in module.parameters():
+            parameter.requires_grad = full_backbone_trainable
+    for parameter in model.backbone.layer4.parameters():
+        parameter.requires_grad = layer4_trainable
+    if not layer4_trainable:
+        return "classifier-only"
+    if not full_backbone_trainable:
+        return "layer4+classifier"
+    return "layer2-4+stem+classifier"
+
+
 def build_scheduler(optimizer: AdamW) -> SequentialLR:
     return SequentialLR(
         optimizer,
@@ -189,7 +226,15 @@ def build_scheduler(optimizer: AdamW) -> SequentialLR:
 def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool) -> tuple[float, float]:
     model.train(training)
     if training:
-        model.backbone.layer1.eval()
+        for module in (
+            model.backbone.bn1,
+            model.backbone.layer1,
+            model.backbone.layer2,
+            model.backbone.layer3,
+            model.backbone.layer4,
+        ):
+            if not any(parameter.requires_grad for parameter in module.parameters()):
+                module.eval()
     total_loss = total_correct = total_samples = 0
     phase = "train" if training else "val"
     progress = tqdm(
@@ -320,13 +365,14 @@ def main() -> None:
     model = ResNet18WithEmbedding(len(CLASS_NAMES))
     load_fractaldb_backbone(model)
     freeze_first_stage(model)
+    set_training_stage(model, 1)
     model.to(device)
     optimizer = build_optimizer(model)
     scheduler = build_scheduler(optimizer)
     start_epoch = 1
     best_accuracy = float("-inf")
     stopping_counter = 0
-    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}) with layer1 frozen", "resnet18-fractaldb/preprocessing/fractaldb_preprocessing.py")
+    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}), staged fine-tuning with layer1 frozen", "resnet18-fractaldb/preprocessing/fractaldb_preprocessing.py")
 
     if args.resume:
         checkpoint = torch.load(args.resume.expanduser().resolve(), map_location=device)
@@ -347,6 +393,7 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     print(f"Training FractalDB ResNet18 on NEW sessions A-R; device={device}; train={len(train_dataset)}; val={len(val_dataset)}")
     for epoch in range(start_epoch, MAX_EPOCHS + 1):
+        stage = set_training_stage(model, epoch)
         sampler.set_epoch(epoch - 1)
         train_loss, train_accuracy = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True)
         val_loss, val_accuracy = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False)
@@ -357,7 +404,7 @@ def main() -> None:
             stopping_counter = 0
         else:
             stopping_counter += 1
-        print(f"epoch={epoch:02d} train_loss={train_loss:.4f} train_acc={train_accuracy:.4f} val_loss={val_loss:.4f} val_acc={val_accuracy:.4f}")
+        print(f"epoch={epoch:02d} stage={stage} train_loss={train_loss:.4f} train_acc={train_accuracy:.4f} val_loss={val_loss:.4f} val_acc={val_accuracy:.4f}")
         save_checkpoint(output_dir / "last.pt", model, optimizer, scheduler, epoch, best_accuracy, stopping_counter, CLASS_NAMES, config)
         if improved:
             save_checkpoint(output_dir / "best.pt", model, optimizer, scheduler, epoch, best_accuracy, stopping_counter, CLASS_NAMES, config)
