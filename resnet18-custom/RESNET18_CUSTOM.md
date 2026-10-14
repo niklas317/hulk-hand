@@ -17,13 +17,16 @@ The expected private dataset layout is:
 
 ```text
 Dataset/
-├── one/
+├── gesture_1/
 │   ├── session_A/
 │   └── ...
-├── two/
-├── stop/
+├── gesture_2/
+├── gesture_3/
 └── no_gesture/
 ```
+
+The class directory names are exactly `gesture_1`, `gesture_2`, `gesture_3`,
+and `no_gesture`; each must contain at least one image in sessions `A-R`.
 
 ## Training
 

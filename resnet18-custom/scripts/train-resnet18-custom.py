@@ -31,7 +31,7 @@ sys.path.insert(0, str(PIPELINE_ROOT / "preprocessing"))
 from gesture_preprocessing import PreprocessConfig, build_eval_transform, build_train_transform
 
 
-CLASS_NAMES = ["one", "two", "stop", "no_gesture"]
+CLASS_NAMES = ["gesture_1", "gesture_2", "gesture_3", "no_gesture"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 TRAIN_SESSIONS = tuple(chr(code) for code in range(ord("A"), ord("R") + 1))
 VAL_SESSIONS = tuple(chr(code) for code in range(ord("S"), ord("V") + 1))
@@ -84,8 +84,12 @@ class BalancedBatchSampler(Sampler[list[int]]):
         grouped: dict[int, list[int]] = {label: [] for label in range(len(CLASS_NAMES))}
         for index, sample in enumerate(dataset.samples):
             grouped[sample.label].append(index)
-        if any(not indices for indices in grouped.values()):
-            raise RuntimeError("Every class must have at least one training image.")
+        missing = [CLASS_NAMES[label] for label, indices in grouped.items() if not indices]
+        if missing:
+            raise RuntimeError(
+                "Every class must have at least one training image in sessions A-R; "
+                f"missing: {', '.join(missing)}."
+            )
         self.grouped = grouped
         self.seed = seed
         self.epoch = 0
@@ -276,6 +280,11 @@ def main() -> None:
         checkpoint = torch.load(args.resume.expanduser().resolve(), map_location=device)
         if checkpoint.get("training_config", {}).get("initialization") != config.initialization:
             raise ValueError("Resume checkpoint is not a from-scratch custom ResNet18 checkpoint.")
+        if checkpoint.get("classes") != CLASS_NAMES:
+            raise ValueError(
+                "Resume checkpoint has incompatible class names; expected "
+                f"{CLASS_NAMES}."
+            )
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])

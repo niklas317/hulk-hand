@@ -16,7 +16,7 @@ import torch.nn as nn
 from torchvision.models import resnet18
 
 
-CLASS_NAMES = ["one", "two", "stop", "no_gesture"]
+CLASS_NAMES = ["gesture_1", "gesture_2", "gesture_3", "no_gesture"]
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 
