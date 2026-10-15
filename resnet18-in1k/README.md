@@ -89,8 +89,34 @@ python3 resnet18-in1k/scripts/train.py \
 ```
 
 Outputs include `best.pt`, `last.pt`, `metrics.json`, and
-`training_config.json`. `best.pt` is selected by validation accuracy and also
-stores the corresponding balanced accuracy.
+`training_config.json`. In the MixStyle experiment, `best.pt` is selected by
+Balanced Validation Accuracy and also stores ordinary validation accuracy.
+
+## MixStyle session-robustness experiment
+
+Run the required MixStyle smoke test first:
+
+```bash
+python3 resnet18-in1k/scripts/train.py --mixstyle-smoke-test
+```
+
+Start the MixStyle run in a fresh output directory; do not resume the previous
+non-MixStyle checkpoint:
+
+```bash
+python3 resnet18-in1k/scripts/train.py \
+  --data-dir /path/to/private/Dataset \
+  --output-dir /path/to/checkpoints/resnet18-in1k-mixstyle \
+  --mixstyle \
+  --freeze-bn
+```
+
+MixStyle is applied only by forward hooks after `layer1` and `layer2` during
+training. It mixes statistics between different session IDs with probability
+`0.5` and Beta parameter `0.1`. Validation, inference, and ONNX export remain
+standard ResNet18. The sampler prints a class/session balance audit at
+startup. Logging additionally includes Macro-F1, worst-session accuracy, and
+the fraction of predictions assigned to `no_gesture`.
 
 ## Evaluation
 
