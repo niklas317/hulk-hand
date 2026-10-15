@@ -172,3 +172,46 @@ The command evaluates exactly the same `S-V` files with deterministic,
 checkpoint-specific preprocessing, reports accuracy/agreement/KL by class and
 session, and writes up to 30 teacher-correct/student-wrong examples. It does
 not create an optimizer or modify either checkpoint.
+
+## Student Grad-CAM and logit calibration
+
+Run the student-only diagnosis before feature distillation:
+
+```bash
+python3 resnet34-fractaldb/scripts/diagnose-student-gradcam-calibration.py \
+  --data-dir /path/to/private/Dataset \
+  --student-checkpoint /path/to/resnet34-distill/best.pt \
+  --output-dir /path/to/resnet34-distill/gradcam-diagnosis
+```
+
+The script writes `validation_logits.pt`, per-class/session `layer4` Grad-CAM
+grids, and `no_gesture_bias_calibration.json`. Bias calibration is diagnostic
+only and must not be interpreted as test-set improvement.
+
+## Feature distillation
+
+The feature-distillation variant keeps the ResNet34 architecture unchanged and
+uses a temporary 512-to-384 linear projection only during training. Its smoke
+test checks embedding dimensions, loss components, gradients, frozen Teacher
+weights, and the E5-v2 unfreezing stages:
+
+```bash
+python3 resnet34-fractaldb/scripts/train-feature-distill-dinov2-resnet34.py \
+  --teacher-checkpoint /path/to/dinov2/best.pt \
+  --data-dir /path/to/private/Dataset \
+  --output-dir /path/to/resnet34-feature-distill \
+  --smoke-test
+```
+
+Start training only after reviewing the diagnostics and smoke-test output:
+
+```bash
+python3 resnet34-fractaldb/scripts/train-feature-distill-dinov2-resnet34.py \
+  --teacher-checkpoint /path/to/dinov2/best.pt \
+  --data-dir /path/to/private/Dataset \
+  --output-dir /path/to/resnet34-feature-distill
+```
+
+The loss weights are CE `0.7`, logit KD `0.2`, and cosine feature loss `0.1`.
+The deployment ResNet34 remains available as `model_state_dict`; the temporary
+projection is stored separately only for training diagnostics/checkpointing.
