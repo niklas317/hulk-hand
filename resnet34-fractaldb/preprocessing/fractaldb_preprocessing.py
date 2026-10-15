@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 from PIL import Image
 
 
@@ -32,6 +33,7 @@ def letterbox_square(image: Image.Image, image_size: int, fill: int = LETTERBOX_
 @dataclass(frozen=True)
 class PreprocessConfig:
     image_size: int = 224
+    fill: int = LETTERBOX_FILL
     mean: tuple[float, float, float] = IMAGENET_MEAN
     std: tuple[float, float, float] = IMAGENET_STD
 
@@ -40,7 +42,7 @@ def build_eval_transform(config: PreprocessConfig = PreprocessConfig()):
     """Build the deterministic resize and ImageNet normalization transform."""
     return transforms.Compose(
         [
-            transforms.Lambda(lambda image: letterbox_square(image, config.image_size)),
+            transforms.Lambda(lambda image: letterbox_square(image, config.image_size, config.fill)),
             transforms.ToTensor(),
             transforms.Normalize(config.mean, config.std),
         ]
@@ -57,19 +59,21 @@ def build_train_transform(config: PreprocessConfig = PreprocessConfig(), augment
                     [transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.02)],
                     p=0.8,
                 ),
-                transforms.RandomRotation(15),
-                transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=(0.9, 1.1), shear=6),
+                transforms.RandomAffine(
+                    degrees=12,
+                    translate=(0.06, 0.06),
+                    scale=(0.94, 1.06),
+                    shear=3,
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=(config.fill,) * 3,
+                ),
             ]
         )
     operations.extend(
         [
-            transforms.Lambda(lambda image: letterbox_square(image, config.image_size)),
+            transforms.Lambda(lambda image: letterbox_square(image, config.image_size, config.fill)),
             transforms.ToTensor(),
             transforms.Normalize(config.mean, config.std),
         ]
     )
-    if augment:
-        operations.append(
-            transforms.RandomErasing(p=0.2, scale=(0.02, 0.12), ratio=(0.3, 3.3), value="random")
-        )
     return transforms.Compose(operations)

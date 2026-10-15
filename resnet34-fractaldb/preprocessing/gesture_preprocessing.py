@@ -14,6 +14,7 @@ from typing import Iterable
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 
 DEFAULT_IMAGE_SIZE = 224
@@ -70,15 +71,19 @@ def build_train_transform(config: PreprocessConfig = PreprocessConfig(), augment
         ops.extend(
             [
                 transforms.RandomApply([transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.02)], p=0.8),
-                transforms.RandomRotation(15),
-                transforms.RandomAffine(degrees=0, translate=(0.08, 0.08), scale=(0.9, 1.1), shear=6),
+                transforms.RandomAffine(
+                    degrees=12,
+                    translate=(0.06, 0.06),
+                    scale=(0.94, 1.06),
+                    shear=3,
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=(config.fill,) * 3,
+                ),
             ]
         )
     ops.append(transforms.Lambda(lambda img: letterbox_square(img, config.image_size, config.fill)))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(mean=config.mean, std=config.std))
-    if augment:
-        ops.append(transforms.RandomErasing(p=0.2, scale=(0.02, 0.12), ratio=(0.3, 3.3), value="random"))
     return transforms.Compose(ops)
 
 
