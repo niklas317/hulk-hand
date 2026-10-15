@@ -144,7 +144,13 @@ python3 resnet34-fractaldb/scripts/train-distill-dinov2-resnet34.py \
   --output-dir /path/to/checkpoints/resnet34-distill
 ```
 
-Use `--freeze-bn` for the optional BatchNorm-frozen variant. The distillation
-loss uses `alpha=0.5`, temperature `2.0`, and label smoothing `0.05`. Teacher
-and student receive the same augmented image; only their normalization paths
-are separate. The output contains only the ResNet34 student weights.
+This is the E5-v2 configuration: CE weight `0.7`, KD weight `0.3`, temperature
+`2.0`, label smoothing `0.05`, and a maximum of 35 epochs. The student stages
+are classifier-only (epoch 1), `layer4+classifier` (epochs 2-3), and
+`layer2+layer3+layer4+stem+classifier` from epoch 4. Frozen BatchNorm modules
+remain in evaluation mode; newly trainable modules use regular BatchNorm.
+Before training, the script reports teacher accuracy on clean and augmented
+`A-R` plus clean `S-V` data and stops if augmentation degrades the teacher
+beyond the configured limit (`--max-teacher-augmentation-drop`, default 10%).
+Teacher and student receive the same augmented image; only their normalization
+paths are separate. The output contains only the ResNet34 student weights.

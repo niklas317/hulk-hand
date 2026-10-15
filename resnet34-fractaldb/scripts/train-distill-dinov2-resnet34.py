@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
@@ -51,17 +50,20 @@ VAL_SESSIONS = tuple(chr(code) for code in range(ord("S"), ord("V") + 1))
 TEST_SESSIONS = tuple(chr(code) for code in range(ord("W"), ord("Z") + 1))
 
 BATCH_SIZE = 32
-MAX_EPOCHS = 40
-HEAD_ONLY_EPOCHS = 3
-LAYER4_START_EPOCH = HEAD_ONLY_EPOCHS + 1
+MAX_EPOCHS = 35
+LAYER4_START_EPOCH = 2
+FULL_BACKBONE_START_EPOCH = 4
 WARMUP_EPOCHS = 3
 WARMUP_START_FACTOR = 0.10
-BACKBONE_LR = 1e-5
+STEM_LR = 1e-5
+LAYER2_LR = 2e-5
+LAYER3_LR = 3e-5
+LAYER4_LR = 5e-5
 CLASSIFIER_LR = 3e-4
 WEIGHT_DECAY = 5e-4
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 7
-ALPHA = 0.5
+ALPHA = 0.3
 TEMPERATURE = 2.0
 LABEL_SMOOTHING = 0.05
 
@@ -170,12 +172,11 @@ def distillation_loss(
 def build_student_optimizer(model: nn.Module) -> AdamW:
     return AdamW(
         [
-            {"params": model.backbone.layer2.parameters(), "lr": BACKBONE_LR},
-            {"params": model.backbone.layer3.parameters(), "lr": BACKBONE_LR},
-            {"params": model.backbone.layer4.parameters(), "lr": BACKBONE_LR},
-            {"params": model.backbone.conv1.parameters(), "lr": BACKBONE_LR},
-            {"params": model.backbone.bn1.parameters(), "lr": BACKBONE_LR},
-            {"params": model.backbone.fc.parameters(), "lr": CLASSIFIER_LR},
+            {"name": "stem", "params": [*model.backbone.conv1.parameters(), *model.backbone.bn1.parameters()], "lr": STEM_LR, "active_epoch": FULL_BACKBONE_START_EPOCH},
+            {"name": "layer2", "params": model.backbone.layer2.parameters(), "lr": LAYER2_LR, "active_epoch": FULL_BACKBONE_START_EPOCH},
+            {"name": "layer3", "params": model.backbone.layer3.parameters(), "lr": LAYER3_LR, "active_epoch": FULL_BACKBONE_START_EPOCH},
+            {"name": "layer4", "params": model.backbone.layer4.parameters(), "lr": LAYER4_LR, "active_epoch": LAYER4_START_EPOCH},
+            {"name": "classifier", "params": model.backbone.fc.parameters(), "lr": CLASSIFIER_LR, "active_epoch": 1},
         ],
         weight_decay=WEIGHT_DECAY,
     )
@@ -188,31 +189,82 @@ def set_student_stage(model: nn.Module, epoch: int) -> str:
         for parameter in module.parameters():
             parameter.requires_grad = False
     layer4_trainable = epoch >= LAYER4_START_EPOCH
+    full_backbone_trainable = epoch >= FULL_BACKBONE_START_EPOCH
     for parameter in model.backbone.layer4.parameters():
         parameter.requires_grad = layer4_trainable
-    return "layer4+classifier" if layer4_trainable else "classifier-only"
+    for module in (model.backbone.layer2, model.backbone.layer3, model.backbone.conv1, model.backbone.bn1):
+        for parameter in module.parameters():
+            parameter.requires_grad = full_backbone_trainable
+    if not layer4_trainable:
+        return "classifier-only"
+    if not full_backbone_trainable:
+        return "layer4+classifier"
+    return "layer2+layer3+layer4+stem+classifier"
 
 
-def set_student_modes(model: nn.Module, freeze_bn: bool) -> None:
+def set_student_modes(model: nn.Module) -> None:
     model.train()
-    for module in (model.backbone.layer1, model.backbone.layer2, model.backbone.layer3, model.backbone.layer4):
+    for module in (model.backbone.bn1, model.backbone.layer1, model.backbone.layer2, model.backbone.layer3, model.backbone.layer4):
         if not any(parameter.requires_grad for parameter in module.parameters()):
             module.eval()
-    if freeze_bn:
-        for module in model.modules():
-            if isinstance(module, nn.BatchNorm2d):
-                module.eval()
+
+
+class ProgressiveLRScheduler:
+    """Warm up each active group, then cosine-decay it without stale activation LRs."""
+
+    def __init__(self, optimizer: AdamW, max_epochs: int, warmup_epochs: int) -> None:
+        self.optimizer = optimizer
+        self.max_epochs = max_epochs
+        self.warmup_epochs = warmup_epochs
+        self.base_lrs = [group["lr"] for group in optimizer.param_groups]
+        self.active_epochs = [int(group["active_epoch"]) for group in optimizer.param_groups]
+        self.last_epoch = 0
+
+    def step(self, epoch: int) -> None:
+        self.last_epoch = epoch
+        if epoch <= self.warmup_epochs:
+            warmup_progress = (epoch - 1) / max(1, self.warmup_epochs - 1)
+            factor = WARMUP_START_FACTOR + (1.0 - WARMUP_START_FACTOR) * warmup_progress
+        else:
+            progress = (epoch - self.warmup_epochs) / max(1, self.max_epochs - self.warmup_epochs)
+            factor = 0.5 * (1.0 + torch.cos(torch.tensor(progress * torch.pi))).item()
+        for group, base_lr, active_epoch in zip(self.optimizer.param_groups, self.base_lrs, self.active_epochs):
+            group["lr"] = 0.0 if epoch < active_epoch else base_lr * factor
+
+    def get_last_lr(self) -> list[float]:
+        return [group["lr"] for group in self.optimizer.param_groups]
+
+    def state_dict(self) -> dict:
+        return {"last_epoch": self.last_epoch, "base_lrs": self.base_lrs}
 
 
 @torch.inference_mode()
-def evaluate_teacher(teacher, loader, device) -> float:
+def evaluate_teacher(teacher, loader, device, description: str) -> dict:
+    class_correct = defaultdict(int)
+    class_total = defaultdict(int)
     correct = total = 0
-    for batch in tqdm(loader, desc="Teacher validation", leave=False):
+    for batch in tqdm(loader, desc=description, leave=False):
         logits = teacher(batch["teacher_image"].to(device, non_blocking=True))["logits"]
         labels = batch["label"].to(device, non_blocking=True)
-        correct += int(logits.argmax(1).eq(labels).sum())
+        predictions = logits.argmax(1)
+        correct += int(predictions.eq(labels).sum())
         total += labels.numel()
-    return correct / max(1, total)
+        for label, prediction in zip(labels.cpu().tolist(), predictions.cpu().tolist()):
+            class_name = CLASS_NAMES[label]
+            class_total[class_name] += 1
+            class_correct[class_name] += int(label == prediction)
+    balanced = sum(class_correct[name] / max(1, class_total[name]) for name in CLASS_NAMES) / len(CLASS_NAMES)
+    metrics = {
+        "accuracy": correct / max(1, total),
+        "balanced_accuracy": balanced,
+        "per_class_accuracy": {
+            name: class_correct[name] / max(1, class_total[name]) for name in CLASS_NAMES
+        },
+    }
+    print(f"{description}: accuracy={metrics['accuracy'] * 100:.2f}% balanced={balanced * 100:.2f}%")
+    for name in CLASS_NAMES:
+        print(f"  Teacher {name:<16} {metrics['per_class_accuracy'][name] * 100:6.2f}% ({class_correct[name]}/{class_total[name]})")
+    return metrics
 
 
 def print_validation_metrics(class_correct, class_total, session_correct, session_total, confusion):
@@ -231,13 +283,16 @@ def print_validation_metrics(class_correct, class_total, session_correct, sessio
     return balanced
 
 
-def run_epoch(student, teacher, loader, optimizer, device, training: bool, freeze_bn: bool):
+def run_epoch(student, teacher, loader, optimizer, device, training: bool):
     if training:
-        set_student_modes(student, freeze_bn)
+        set_student_modes(student)
     else:
         student.eval()
     total_loss = total_ce = total_kd = 0.0
     correct = total = 0
+    teacher_correct = teacher_total = 0
+    teacher_class_correct = defaultdict(int)
+    teacher_class_total = defaultdict(int)
     class_correct = defaultdict(int)
     class_total = defaultdict(int)
     session_correct = defaultdict(int)
@@ -261,11 +316,18 @@ def run_epoch(student, teacher, loader, optimizer, device, training: bool, freez
                 optimizer.step()
         count = labels.size(0)
         predictions = student_logits.argmax(1)
+        teacher_predictions = teacher_logits.argmax(1)
         total_loss += loss.detach().item() * count
         total_ce += ce_loss.detach().item() * count
         total_kd += kd_loss.detach().item() * count
         correct += int(predictions.eq(labels).sum())
         total += count
+        teacher_correct += int(teacher_predictions.eq(labels).sum())
+        teacher_total += count
+        for label, prediction in zip(labels.cpu().tolist(), teacher_predictions.cpu().tolist()):
+            class_name = CLASS_NAMES[label]
+            teacher_class_total[class_name] += 1
+            teacher_class_correct[class_name] += int(label == prediction)
         if not training:
             for label, prediction, session in zip(labels.cpu().tolist(), predictions.cpu().tolist(), batch["session"]):
                 class_total[CLASS_NAMES[label]] += 1
@@ -279,19 +341,24 @@ def run_epoch(student, teacher, loader, optimizer, device, training: bool, freez
         "ce_loss": total_ce / max(1, total),
         "kd_loss": total_kd / max(1, total),
         "accuracy": correct / max(1, total),
+        "teacher_accuracy": teacher_correct / max(1, teacher_total),
+        "teacher_balanced_accuracy": sum(
+            teacher_class_correct[name] / max(1, teacher_class_total[name]) for name in CLASS_NAMES
+        ) / len(CLASS_NAMES),
     }
     if not training:
         metrics["balanced_accuracy"] = print_validation_metrics(class_correct, class_total, session_correct, session_total, confusion)
     return metrics
 
 
-def save_student_checkpoint(path, student, optimizer, scheduler, epoch, best_accuracy, history, config):
+def save_student_checkpoint(path, student, optimizer, scheduler, epoch, best_accuracy, best_balanced_accuracy, history, config):
     torch.save({
         "model_state_dict": student.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "epoch": epoch,
         "best_val_accuracy": best_accuracy,
+        "best_val_balanced_accuracy": best_balanced_accuracy,
         "classes": CLASS_NAMES,
         "class_to_idx": {name: index for index, name in enumerate(CLASS_NAMES)},
         "training_config": config,
@@ -305,8 +372,8 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--freeze-bn", action="store_true")
     parser.add_argument("--minimum-teacher-val-accuracy", type=float, default=0.80)
+    parser.add_argument("--max-teacher-augmentation-drop", type=float, default=0.10)
     parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args()
 
@@ -328,13 +395,26 @@ def main() -> None:
     teacher = load_teacher(args.teacher_checkpoint, teacher_checkpoint, device)
     train_raw = student_api.collect_samples(data_dir, TRAIN_SESSIONS, lambda image: image)
     val_raw = student_api.collect_samples(data_dir, VAL_SESSIONS, lambda image: image)
+    if not train_raw.samples or not val_raw.samples:
+        raise RuntimeError("Training sessions A-R and validation sessions S-V must both contain images.")
     train_dataset = PairedDataset(train_raw.samples, train=True)
+    train_clean_dataset = PairedDataset(train_raw.samples, train=False)
     val_dataset = PairedDataset(val_raw.samples, train=False)
     train_sampler = student_api.BalancedBatchSampler(train_raw, seed=42)
     train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, num_workers=args.num_workers, pin_memory=device.type == "cuda")
+    train_clean_loader = DataLoader(train_clean_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
-    teacher_val_accuracy = evaluate_teacher(teacher, val_loader, device)
-    print(f"Teacher validation accuracy: {teacher_val_accuracy * 100:.2f}%")
+    teacher_val = evaluate_teacher(teacher, val_loader, device, "Teacher validation S-V")
+    teacher_train_clean = evaluate_teacher(teacher, train_clean_loader, device, "Teacher clean training A-R")
+    teacher_train_aug = evaluate_teacher(teacher, train_loader, device, "Teacher augmented training A-R")
+    teacher_val_accuracy = teacher_val["accuracy"]
+    augmentation_drop = teacher_train_clean["accuracy"] - teacher_train_aug["accuracy"]
+    if augmentation_drop > args.max_teacher_augmentation_drop:
+        print(
+            f"WARNING: teacher augmentation drop is {augmentation_drop * 100:.2f} percentage points "
+            f"(limit {args.max_teacher_augmentation_drop * 100:.2f})."
+        )
+        raise RuntimeError("Teacher performance degrades too much under the training augmentation; training stopped.")
     if teacher_val_accuracy < args.minimum_teacher_val_accuracy:
         raise RuntimeError("Teacher validation accuracy is below the required threshold; student training stopped.")
 
@@ -344,7 +424,7 @@ def main() -> None:
     set_student_stage(student, 1)
     student.to(device)
     optimizer = build_student_optimizer(student)
-    scheduler = SequentialLR(optimizer, [LinearLR(optimizer, start_factor=WARMUP_START_FACTOR, total_iters=WARMUP_EPOCHS), CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS - WARMUP_EPOCHS)], milestones=[WARMUP_EPOCHS])
+    scheduler = ProgressiveLRScheduler(optimizer, MAX_EPOCHS, WARMUP_EPOCHS)
 
     # Required preflight: prove teacher is frozen and the student can update.
     smoke_batch = next(iter(train_loader))
@@ -369,29 +449,47 @@ def main() -> None:
     set_student_stage(student, 1)
     student.to(device)
     optimizer = build_student_optimizer(student)
-    scheduler = SequentialLR(optimizer, [LinearLR(optimizer, start_factor=WARMUP_START_FACTOR, total_iters=WARMUP_EPOCHS), CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS - WARMUP_EPOCHS)], milestones=[WARMUP_EPOCHS])
+    scheduler = ProgressiveLRScheduler(optimizer, MAX_EPOCHS, WARMUP_EPOCHS)
 
     history = []
     best_accuracy = float("-inf")
+    best_balanced_accuracy = float("-inf")
     stale_epochs = 0
-    config = asdict(DistillationConfig(str(args.teacher_checkpoint.expanduser().resolve()), str(data_dir), str(args.output_dir.resolve()), ALPHA, TEMPERATURE, LABEL_SMOOTHING, BACKBONE_LR, CLASSIFIER_LR, WEIGHT_DECAY, MAX_EPOCHS, EARLY_STOPPING_PATIENCE, args.freeze_bn, teacher_val_accuracy))
+    config = asdict(DistillationConfig(
+        str(args.teacher_checkpoint.expanduser().resolve()),
+        str(data_dir),
+        str(args.output_dir.resolve()),
+        ALPHA,
+        TEMPERATURE,
+        LABEL_SMOOTHING,
+        {"stem": STEM_LR, "layer2": LAYER2_LR, "layer3": LAYER3_LR, "layer4": LAYER4_LR, "classifier": CLASSIFIER_LR},
+        WEIGHT_DECAY,
+        MAX_EPOCHS,
+        EARLY_STOPPING_PATIENCE,
+        teacher_val,
+        teacher_train_clean,
+        teacher_train_aug,
+    ))
     for epoch in range(1, MAX_EPOCHS + 1):
         stage = set_student_stage(student, epoch)
-        train_metrics = run_epoch(student, teacher, train_loader, optimizer, device, True, args.freeze_bn)
-        val_metrics = run_epoch(student, teacher, val_loader, optimizer, device, False, args.freeze_bn)
-        scheduler.step()
-        record = {"epoch": epoch, "stage": stage, "train": train_metrics, "validation": val_metrics}
+        scheduler.step(epoch)
+        train_metrics = run_epoch(student, teacher, train_loader, optimizer, device, True)
+        val_metrics = run_epoch(student, teacher, val_loader, optimizer, device, False)
+        learning_rates = {group["name"]: group["lr"] for group in optimizer.param_groups}
+        record = {"epoch": epoch, "stage": stage, "learning_rates": learning_rates, "train": train_metrics, "validation": val_metrics}
         history.append(record)
         improved = val_metrics["accuracy"] > best_accuracy
         if improved:
             best_accuracy = val_metrics["accuracy"]
+            best_balanced_accuracy = val_metrics["balanced_accuracy"]
             stale_epochs = 0
         else:
             stale_epochs += 1
-        print(f"epoch={epoch:02d} stage={stage} train_acc={train_metrics['accuracy']:.4f} train_ce={train_metrics['ce_loss']:.4f} train_kd={train_metrics['kd_loss']:.4f} train_total={train_metrics['total_loss']:.4f} val_acc={val_metrics['accuracy']:.4f} val_balanced={val_metrics['balanced_accuracy']:.4f}")
-        save_student_checkpoint(args.output_dir / "last.pt", student, optimizer, scheduler, epoch, best_accuracy, history, config)
+        print(f"epoch={epoch:02d} stage={stage} train_acc={train_metrics['accuracy']:.4f} train_ce={train_metrics['ce_loss']:.4f} train_kd={train_metrics['kd_loss']:.4f} train_total={train_metrics['total_loss']:.4f} teacher_aug_acc={train_metrics['teacher_accuracy']:.4f} val_acc={val_metrics['accuracy']:.4f} val_balanced={val_metrics['balanced_accuracy']:.4f}")
+        print("  Learning rates: " + ", ".join(f"{name}={value:.3e}" for name, value in learning_rates.items() if value > 0.0))
+        save_student_checkpoint(args.output_dir / "last.pt", student, optimizer, scheduler, epoch, best_accuracy, best_balanced_accuracy, history, config)
         if improved:
-            save_student_checkpoint(args.output_dir / "best.pt", student, optimizer, scheduler, epoch, best_accuracy, history, config)
+            save_student_checkpoint(args.output_dir / "best.pt", student, optimizer, scheduler, epoch, best_accuracy, best_balanced_accuracy, history, config)
         (args.output_dir / "metrics.json").write_text(json.dumps(history, indent=2) + "\n")
         (args.output_dir / "training_config.json").write_text(json.dumps(config, indent=2) + "\n")
         if stale_epochs >= EARLY_STOPPING_PATIENCE:
@@ -407,13 +505,13 @@ class DistillationConfig:
     alpha: float
     temperature: float
     label_smoothing: float
-    backbone_lr: float
-    classifier_lr: float
+    learning_rates: dict[str, float]
     weight_decay: float
     max_epochs: int
     early_stopping_patience: int
-    freeze_bn: bool
-    teacher_validation_accuracy: float
+    teacher_validation: dict
+    teacher_train_clean: dict
+    teacher_train_augmented: dict
 
 
 if __name__ == "__main__":
