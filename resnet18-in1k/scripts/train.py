@@ -44,11 +44,13 @@ LAYER2_LR = 2e-5
 LAYER3_LR = 3e-5
 LAYER4_LR = 5e-5
 CLASSIFIER_LR = 3e-4
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 5e-4
 LABEL_SMOOTHING = 0.05
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 7
-BACKBONE_START_EPOCH = 3
+BACKBONE_START_EPOCH = 5
+FREEZE_BN = True
+CLASS_WEIGHTS = (1.15, 1.30, 1.15, 0.70)
 
 
 @dataclass(frozen=True)
@@ -171,12 +173,16 @@ def set_training_stage(model: nn.Module, epoch: int) -> str:
     return "backbone+fc" if backbone_trainable else "fc-only"
 
 
-def set_module_modes(model: nn.Module) -> None:
+def set_module_modes(model: nn.Module, freeze_bn: bool) -> None:
     model.train()
     frozen = (model.bn1, model.layer1, model.layer2, model.layer3, model.layer4)
     for module in frozen:
         if not any(parameter.requires_grad for parameter in module.parameters()):
             module.eval()
+    if freeze_bn:
+        for module in model.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.eval()
 
 
 def build_optimizer(model: nn.Module) -> AdamW:
@@ -218,9 +224,9 @@ class ProgressiveLRScheduler:
         self.last_epoch = int(state.get("last_epoch", 0))
 
 
-def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool) -> dict:
+def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool, freeze_bn: bool) -> dict:
     if training:
-        set_module_modes(model)
+        set_module_modes(model, freeze_bn)
     else:
         model.eval()
     loss_sum = correct = total = 0.0
@@ -288,6 +294,8 @@ class TrainingConfig:
     preprocessing: str
     learning_rates: dict[str, float]
     label_smoothing: float
+    class_weights: tuple[float, ...]
+    freeze_bn: bool
 
 
 def save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, best_accuracy: float, best_balanced: float, stale: int, config: TrainingConfig) -> None:
@@ -334,6 +342,7 @@ def main() -> None:
     parser.add_argument("--layer3-lr", type=float, default=LAYER3_LR)
     parser.add_argument("--layer4-lr", type=float, default=LAYER4_LR)
     parser.add_argument("--classifier-lr", type=float, default=CLASSIFIER_LR)
+    parser.add_argument("--freeze-bn", action=argparse.BooleanOptionalAction, default=FREEZE_BN)
     args = parser.parse_args()
     BATCH_SIZE = args.batch_size
     MAX_EPOCHS = args.max_epochs
@@ -370,15 +379,16 @@ def main() -> None:
     start_epoch, best_accuracy, best_balanced, stale = 1, float("-inf"), float("-inf"), 0
     if args.resume:
         start_epoch, best_accuracy, best_balanced, stale = load_checkpoint(args.resume, model, optimizer, scheduler, device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    training_config = TrainingConfig(str(data_dir), str(output_dir), args.seed, BATCH_SIZE, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, tuple(CLASS_NAMES), "torchvision ResNet18_Weights.IMAGENET1K_V1", "resnet18-in1k/preprocessing/in1k_preprocessing.py", {"stem": STEM_LR, "layer1": LAYER1_LR, "layer2": LAYER2_LR, "layer3": LAYER3_LR, "layer4": LAYER4_LR, "fc": CLASSIFIER_LR}, LABEL_SMOOTHING)
+    class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32, device=device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=LABEL_SMOOTHING)
+    training_config = TrainingConfig(str(data_dir), str(output_dir), args.seed, BATCH_SIZE, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, tuple(CLASS_NAMES), "torchvision ResNet18_Weights.IMAGENET1K_V1", "resnet18-in1k/preprocessing/in1k_preprocessing.py", {"stem": STEM_LR, "layer1": LAYER1_LR, "layer2": LAYER2_LR, "layer3": LAYER3_LR, "layer4": LAYER4_LR, "fc": CLASSIFIER_LR}, LABEL_SMOOTHING, CLASS_WEIGHTS, args.freeze_bn)
     history = []
     for epoch in range(start_epoch, MAX_EPOCHS + 1):
         sampler.set_epoch(epoch)
         stage = set_training_stage(model, epoch)
         scheduler.step(epoch)
-        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True)
-        val_metrics = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False)
+        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True, args.freeze_bn)
+        val_metrics = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False, args.freeze_bn)
         learning_rates = {group["name"]: group["lr"] for group in optimizer.param_groups}
         record = {"epoch": epoch, "stage": stage, "learning_rates": learning_rates, "train": train_metrics, "validation": val_metrics}
         history.append(record)

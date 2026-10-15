@@ -45,8 +45,10 @@ mean = (0.485, 0.456, 0.406)
 std  = (0.229, 0.224, 0.225)
 ```
 
-Training uses moderate ColorJitter and one bilinear affine transform:
-rotation up to 8 degrees, translation up to 3%, scale 0.97-1.03, black fill.
+Training uses stronger but still non-cropping ColorJitter and one bilinear
+affine transform: rotation up to 12 degrees, translation up to 6%, scale
+0.94-1.06, black fill. This is intended to reduce camera/background and burst
+session overfitting without removing fingers.
 There is no crop, blur, or RandomErasing. Validation, test, and deployment use
 the deterministic evaluation transform without augmentation.
 
@@ -60,16 +62,22 @@ python3 resnet18-in1k/scripts/train.py \
   --output-dir /path/to/checkpoints/resnet18-in1k
 ```
 
-The default configuration is batch size 32, at most 30 epochs, AdamW,
-weight decay `1e-4`, label smoothing `0.05`, gradient clipping `1.0`, warmup
-plus cosine decay, and early-stopping patience 7. Epochs 1-2 train only
-`fc`; from epoch 3 the complete backbone is trainable with layer-specific
-learning rates. The rates are configurable in `scripts/train.py`:
+The current robust-training configuration is batch size 32, at most 30 epochs,
+AdamW, weight decay `5e-4`, label smoothing `0.05`, gradient clipping `1.0`,
+warmup plus cosine decay, and early-stopping patience 7. Epochs 1-4 train
+only `fc`; from epoch 5 the complete backbone is trainable with layer-specific
+learning rates. BatchNorm statistics are frozen by default to reduce
+session-specific drift. The rates are configurable in `scripts/train.py`:
 
 ```text
 conv1+bn1  1e-5     layer1 1e-5     layer2 2e-5
 layer3    3e-5     layer4 5e-5     fc     3e-4
 ```
+
+The weighted training loss uses class weights `(1.15, 1.30, 1.15, 0.70)` for
+`gesture_1`, `gesture_2`, `gesture_3`, and `no_gesture`, respectively. This
+directly targets the observed gesture-to-`no_gesture` error pattern. Disable
+BatchNorm freezing only for a controlled comparison with `--no-freeze-bn`.
 
 Resume a run with matching configuration:
 

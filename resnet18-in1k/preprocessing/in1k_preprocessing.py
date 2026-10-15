@@ -39,11 +39,14 @@ def build_train_transform(config: PreprocessConfig = PreprocessConfig()):
     """Apply only conservative online augmentation to the stored image."""
     return transforms.Compose(
         [
-            transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.01),
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.15, hue=0.02)],
+                p=0.8,
+            ),
             transforms.RandomAffine(
-                degrees=8,
-                translate=(0.03, 0.03),
-                scale=(0.97, 1.03),
+                degrees=12,
+                translate=(0.06, 0.06),
+                scale=(0.94, 1.06),
                 interpolation=InterpolationMode.BILINEAR,
                 fill=BLACK_FILL,
             ),
