@@ -173,7 +173,7 @@ def main() -> None:
         raise FileExistsError("Output directory already contains best.pt; use a fresh output directory.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     data_dir = args.data_dir.expanduser().resolve()
-    base.set_seed(42)
+    base.student_api.set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     teacher_checkpoint = base.load_checkpoint(args.teacher_checkpoint)
     teacher = base.load_teacher(args.teacher_checkpoint, teacher_checkpoint, device)
