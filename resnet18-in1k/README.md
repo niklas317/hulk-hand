@@ -118,6 +118,39 @@ standard ResNet18. The sampler prints a class/session balance audit at
 startup. Logging additionally includes Macro-F1, worst-session accuracy, and
 the fraction of predictions assigned to `no_gesture`.
 
+## Session-aware supervised contrastive experiment
+
+Run the contrastive smoke test before training:
+
+```bash
+python3 resnet18-in1k/scripts/train.py --session-contrastive-smoke-test
+```
+
+Start from the original ImageNet-1K checkpoint in a new output directory:
+
+```bash
+python3 resnet18-in1k/scripts/train.py \
+  --data-dir /path/to/private/Dataset \
+  --output-dir /path/to/checkpoints/resnet18-in1k-session-contrastive \
+  --experiment session-contrastive \
+  --freeze-bn
+```
+
+The existing MixStyle behavior remains enabled in this mode. After the
+backbone becomes trainable, the additional loss ramps from 0 to `0.05` over
+three epochs:
+
+```text
+total_loss = cross_entropy + contrastive_weight * session_contrastive_loss
+temperature = 0.1
+```
+
+Only defined gesture classes form positive pairs, and only samples from
+different sessions are positive. `no_gesture` never forms positive pairs but
+remains a negative class. The 512-D pooled ResNet18 embedding is used
+directly; no projection head or deployment component is added. Checkpoint
+selection remains based on Balanced Validation Accuracy.
+
 ## Evaluation
 
 Before changing the training recipe, inspect the session/domain failure mode

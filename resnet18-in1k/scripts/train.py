@@ -104,35 +104,32 @@ class BalancedBatchSampler(Sampler[list[int]]):
     def __iter__(self) -> Iterator[list[int]]:
         rng = random.Random(self.seed + self.epoch)
         per_class = BATCH_SIZE // len(CLASS_NAMES)
-        sequences = {}
-        required = BATCHES_PER_EPOCH * per_class
+        by_label_session: dict[int, dict[str, list[int]]] = {}
+        cursors: dict[tuple[int, str], int] = {}
         for label, source in self.grouped.items():
             by_session: dict[str, list[int]] = defaultdict(list)
             for index in source:
                 by_session[self.dataset.samples[index].session].append(index)
-            sessions = list(by_session)
             for pool in by_session.values():
                 rng.shuffle(pool)
-            cursors = {session: 0 for session in sessions}
-            sequence = []
-            while len(sequence) < required:
+            by_label_session[label] = by_session
+            for session in by_session:
+                cursors[(label, session)] = 0
+        for _batch_index in range(BATCHES_PER_EPOCH):
+            batch = []
+            for label in sorted(by_label_session):
+                by_session = by_label_session[label]
+                sessions = list(by_session)
                 rng.shuffle(sessions)
-                for session in sessions:
+                selected_sessions = sessions[:per_class] if len(sessions) >= per_class else [sessions[index % len(sessions)] for index in range(per_class)]
+                for session in selected_sessions:
                     pool = by_session[session]
-                    cursor = cursors[session]
+                    cursor = cursors[(label, session)]
                     if cursor >= len(pool):
                         rng.shuffle(pool)
                         cursor = 0
-                    sequence.append(pool[cursor])
-                    cursors[session] = cursor + 1
-                    if len(sequence) == required:
-                        break
-            sequences[label] = sequence
-        for batch_index in range(BATCHES_PER_EPOCH):
-            batch = []
-            start = batch_index * per_class
-            for label in sorted(sequences):
-                batch.extend(sequences[label][start : start + per_class])
+                    batch.append(pool[cursor])
+                    cursors[(label, session)] = cursor + 1
             rng.shuffle(batch)
             yield batch
 
@@ -241,6 +238,62 @@ def register_mixstyle_hooks(model: nn.Module, mixstyle: SessionMixStyle, layers:
     return handles
 
 
+def session_contrastive_loss(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    sessions: list[str],
+    temperature: float = 0.1,
+) -> tuple[torch.Tensor, int]:
+    """Compute stable supervised contrastive loss for gesture anchors only."""
+    if embeddings.ndim != 2 or len(sessions) != embeddings.size(0):
+        raise ValueError("Embeddings must be [batch, features] and sessions must match the batch.")
+    normalized = F.normalize(embeddings, dim=1)
+    similarities = normalized @ normalized.t() / temperature
+    batch_size = embeddings.size(0)
+    identity = torch.eye(batch_size, dtype=torch.bool, device=embeddings.device)
+    positive_mask = (labels[:, None] == labels[None, :]) & ~identity
+    session_mask = torch.tensor(
+        [[sessions[row] != sessions[column] for column in range(batch_size)] for row in range(batch_size)],
+        dtype=torch.bool,
+        device=embeddings.device,
+    )
+    positive_mask &= session_mask & (labels[:, None] != len(CLASS_NAMES) - 1)
+    valid_anchors = positive_mask.any(dim=1)
+    if not valid_anchors.any():
+        return embeddings.sum() * 0.0, 0
+    comparison_mask = ~identity & ((labels[:, None] != labels[None, :]) | session_mask)
+    logits = similarities.masked_fill(~comparison_mask, float("-inf"))
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    positive_count = positive_mask.sum(dim=1).clamp_min(1)
+    per_anchor = -(log_prob.masked_fill(~positive_mask, 0.0).sum(dim=1) / positive_count)
+    return per_anchor[valid_anchors].mean(), int(valid_anchors.sum())
+
+
+def mean_cross_session_positive_similarity(
+    embeddings: torch.Tensor, labels: torch.Tensor, sessions: list[str]
+) -> float | None:
+    """Return a detached diagnostic for defined-gesture cross-session pairs."""
+    normalized = F.normalize(embeddings.detach(), dim=1)
+    batch_size = embeddings.size(0)
+    different_session = torch.tensor(
+        [[sessions[row] != sessions[column] for column in range(batch_size)] for row in range(batch_size)],
+        dtype=torch.bool,
+        device=embeddings.device,
+    )
+    gesture = labels != len(CLASS_NAMES) - 1
+    positive_mask = (labels[:, None] == labels[None, :]) & different_session & gesture[:, None] & gesture[None, :]
+    if not positive_mask.any():
+        return None
+    return float((normalized @ normalized.t())[positive_mask].mean().item())
+
+
+def contrastive_weight(epoch: int) -> float:
+    """Ramp 0 -> 0.05 over the first three backbone-training epochs."""
+    if epoch < BACKBONE_START_EPOCH:
+        return 0.0
+    return min(0.05, 0.05 * (epoch - BACKBONE_START_EPOCH) / 2.0)
+
+
 def audit_sampler(sampler: BalancedBatchSampler) -> None:
     counts: dict[tuple[int, str], int] = defaultdict(int)
     for batch in sampler:
@@ -291,7 +344,7 @@ class ProgressiveLRScheduler:
         self.last_epoch = int(state.get("last_epoch", 0))
 
 
-def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool, freeze_bn: bool, mixstyle: SessionMixStyle | None = None) -> dict:
+def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool, freeze_bn: bool, mixstyle: SessionMixStyle | None = None, use_contrastive: bool = False) -> dict:
     if training:
         set_module_modes(model, freeze_bn)
         if mixstyle:
@@ -300,7 +353,15 @@ def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training:
         model.eval()
         if mixstyle:
             mixstyle.set_training(False)
-    loss_sum = correct = total = 0.0
+    contrastive_weight_value = contrastive_weight(epoch) if training and use_contrastive else 0.0
+    embedding_holder: dict[str, torch.Tensor] = {}
+    embedding_handle = None
+    if contrastive_weight_value > 0.0:
+        embedding_handle = model.avgpool.register_forward_hook(lambda _module, _inputs, output: embedding_holder.__setitem__("embedding", output.flatten(1)))
+    loss_sum = classification_loss_sum = contrastive_loss_sum = correct = total = 0.0
+    contrastive_anchor_count = 0
+    positive_similarity_sum = 0.0
+    positive_similarity_batches = 0
     class_correct = defaultdict(int)
     class_total = defaultdict(int)
     session_correct = defaultdict(int)
@@ -315,7 +376,17 @@ def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training:
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(training):
             logits = model(images)
-            loss = criterion(logits, labels)
+            classification_loss = criterion(logits, labels)
+            if contrastive_weight_value > 0.0:
+                contrastive_loss, anchors = session_contrastive_loss(embedding_holder["embedding"], labels, batch["session"])
+                positive_similarity = mean_cross_session_positive_similarity(embedding_holder["embedding"], labels, batch["session"])
+                if positive_similarity is not None:
+                    positive_similarity_sum += positive_similarity
+                    positive_similarity_batches += 1
+            else:
+                contrastive_loss = logits.sum() * 0.0
+                anchors = 0
+            loss = classification_loss + contrastive_weight_value * contrastive_loss
             if training:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
@@ -323,6 +394,9 @@ def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training:
         predictions = logits.argmax(1)
         count = labels.size(0)
         loss_sum += float(loss.detach()) * count
+        classification_loss_sum += float(classification_loss.detach()) * count
+        contrastive_loss_sum += float(contrastive_loss.detach()) * count
+        contrastive_anchor_count += anchors
         correct += int(predictions.eq(labels).sum())
         total += count
         if not training:
@@ -333,7 +407,19 @@ def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training:
                 session_total[session] += 1
                 session_correct[session] += int(label == prediction)
                 confusion[label, prediction] += 1
-    metrics = {"loss": loss_sum / max(1, total), "accuracy": correct / max(1, total)}
+    if embedding_handle is not None:
+        embedding_handle.remove()
+    metrics = {
+        "loss": loss_sum / max(1, total),
+        "classification_loss": classification_loss_sum / max(1, total),
+        "contrastive_loss": contrastive_loss_sum / max(1, total),
+        "contrastive_weight": contrastive_weight_value,
+        "contrastive_anchors": contrastive_anchor_count,
+        "mean_cross_session_positive_similarity": (
+            positive_similarity_sum / positive_similarity_batches if positive_similarity_batches else None
+        ),
+        "accuracy": correct / max(1, total),
+    }
     if not training:
         metrics["per_class_accuracy"] = {name: class_correct[name] / max(1, class_total[name]) for name in CLASS_NAMES}
         metrics["balanced_accuracy"] = sum(metrics["per_class_accuracy"].values()) / len(CLASS_NAMES)
@@ -386,6 +472,7 @@ class TrainingConfig:
     mixstyle_probability: float
     mixstyle_alpha: float
     mixstyle_layers: tuple[str, ...]
+    experiment: str
 
 
 def save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, best_accuracy: float, best_balanced: float, stale: int, config: TrainingConfig) -> None:
@@ -445,6 +532,57 @@ def run_mixstyle_smoke_test() -> None:
             handle.remove()
 
 
+def run_session_contrastive_smoke_test() -> None:
+    """Check pairs, numerical stability, gradients, sampler diversity, and eval behavior."""
+    torch.manual_seed(11)
+    embeddings = torch.randn(8, 512, requires_grad=True)
+    labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
+    sessions = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    loss, anchors = session_contrastive_loss(embeddings, labels, sessions)
+    assert anchors == 6
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert embeddings.grad is not None and torch.isfinite(embeddings.grad).all()
+    no_positive_loss, no_positive_anchors = session_contrastive_loss(
+        torch.randn(2, 512, requires_grad=True), torch.tensor([0, 0]), ["A", "A"]
+    )
+    assert no_positive_anchors == 0 and torch.isfinite(no_positive_loss)
+
+    synthetic_samples = [
+        Sample(Path(f"/tmp/session_{session}_{label}.png"), label, CLASS_NAMES[label], session)
+        for label in range(4)
+        for session in tuple("ABCDEFGH")
+    ]
+    synthetic_dataset = SessionDataset(synthetic_samples, lambda image: image)
+    sampler = BalancedBatchSampler(synthetic_dataset, seed=3)
+    batch = next(iter(sampler))
+    for label in range(4):
+        sessions_for_class = {
+            synthetic_dataset.samples[index].session
+            for index in batch
+            if synthetic_dataset.samples[index].label == label
+        }
+        assert len(sessions_for_class) == 8
+
+    model = build_model(pretrained=False)
+    mixstyle = SessionMixStyle(probability=1.0, alpha=0.1)
+    handles = register_mixstyle_hooks(model, mixstyle)
+    try:
+        inputs = torch.randn(4, 3, 224, 224)
+        mixstyle.set_sessions(["A", "B", "C", "D"])
+        model.eval()
+        mixstyle.set_training(False)
+        with torch.no_grad():
+            output_a = model(inputs)
+            output_b = model(inputs)
+        assert torch.allclose(output_a, output_b, atol=1e-6, rtol=1e-6)
+        assert output_a.shape == (4, len(CLASS_NAMES))
+    finally:
+        for handle in handles:
+            handle.remove()
+    print(f"Session-contrastive smoke test passed: anchors={anchors}, loss={loss.item():.6f}, eval output=[4,{len(CLASS_NAMES)}].")
+
+
 def main() -> None:
     global BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, BACKBONE_START_EPOCH
     global STEM_LR, LAYER1_LR, LAYER2_LR, LAYER3_LR, LAYER4_LR, CLASSIFIER_LR
@@ -465,9 +603,11 @@ def main() -> None:
     parser.add_argument("--classifier-lr", type=float, default=CLASSIFIER_LR)
     parser.add_argument("--freeze-bn", action=argparse.BooleanOptionalAction, default=FREEZE_BN)
     parser.add_argument("--mixstyle", action="store_true", help="Enable training-only session-aware MixStyle after layer1 and layer2")
+    parser.add_argument("--experiment", choices=("baseline", "mixstyle", "session-contrastive"), default="baseline")
     parser.add_argument("--mixstyle-probability", type=float, default=MIXSTYLE_PROBABILITY)
     parser.add_argument("--mixstyle-alpha", type=float, default=MIXSTYLE_ALPHA)
     parser.add_argument("--mixstyle-smoke-test", action="store_true", help="Run the MixStyle smoke test without data or training")
+    parser.add_argument("--session-contrastive-smoke-test", action="store_true", help="Run the contrastive/sampler smoke test without data or training")
     args = parser.parse_args()
     BATCH_SIZE = args.batch_size
     MAX_EPOCHS = args.max_epochs
@@ -485,8 +625,11 @@ def main() -> None:
     if args.mixstyle_smoke_test:
         run_mixstyle_smoke_test()
         return
+    if args.session_contrastive_smoke_test:
+        run_session_contrastive_smoke_test()
+        return
     if args.data_dir is None or args.output_dir is None:
-        parser.error("--data-dir and --output-dir are required unless --mixstyle-smoke-test is used")
+        parser.error("--data-dir and --output-dir are required unless a smoke-test flag is used")
     output_dir = args.output_dir.expanduser().resolve()
     if (output_dir / "best.pt").exists() and args.resume is None:
         raise FileExistsError(f"{output_dir} contains best.pt; use a fresh directory or --resume.")
@@ -507,7 +650,9 @@ def main() -> None:
     train_loader = DataLoader(train_dataset, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     model = build_model(pretrained=True).to(device)
-    mixstyle = SessionMixStyle(args.mixstyle_probability, args.mixstyle_alpha) if args.mixstyle else None
+    use_mixstyle = args.mixstyle or args.experiment in ("mixstyle", "session-contrastive")
+    use_contrastive = args.experiment == "session-contrastive"
+    mixstyle = SessionMixStyle(args.mixstyle_probability, args.mixstyle_alpha) if use_mixstyle else None
     mixstyle_handles = register_mixstyle_hooks(model, mixstyle) if mixstyle else []
     optimizer = build_optimizer(model)
     scheduler = ProgressiveLRScheduler(optimizer)
@@ -516,27 +661,30 @@ def main() -> None:
         start_epoch, best_accuracy, best_balanced, stale = load_checkpoint(args.resume, model, optimizer, scheduler, device)
     class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32, device=device)
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=LABEL_SMOOTHING)
-    training_config = TrainingConfig(str(data_dir), str(output_dir), args.seed, BATCH_SIZE, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, tuple(CLASS_NAMES), "torchvision ResNet18_Weights.IMAGENET1K_V1", "resnet18-in1k/preprocessing/in1k_preprocessing.py", {"stem": STEM_LR, "layer1": LAYER1_LR, "layer2": LAYER2_LR, "layer3": LAYER3_LR, "layer4": LAYER4_LR, "fc": CLASSIFIER_LR}, LABEL_SMOOTHING, CLASS_WEIGHTS, args.freeze_bn, args.mixstyle, args.mixstyle_probability, args.mixstyle_alpha, MIXSTYLE_LAYERS)
+    training_config = TrainingConfig(str(data_dir), str(output_dir), args.seed, BATCH_SIZE, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, tuple(CLASS_NAMES), "torchvision ResNet18_Weights.IMAGENET1K_V1", "resnet18-in1k/preprocessing/in1k_preprocessing.py", {"stem": STEM_LR, "layer1": LAYER1_LR, "layer2": LAYER2_LR, "layer3": LAYER3_LR, "layer4": LAYER4_LR, "fc": CLASSIFIER_LR}, LABEL_SMOOTHING, CLASS_WEIGHTS, args.freeze_bn, use_mixstyle, args.mixstyle_probability, args.mixstyle_alpha, MIXSTYLE_LAYERS, args.experiment)
     history = []
     for epoch in range(start_epoch, MAX_EPOCHS + 1):
         sampler.set_epoch(epoch)
         stage = set_training_stage(model, epoch)
         scheduler.step(epoch)
-        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True, args.freeze_bn, mixstyle)
-        val_metrics = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False, args.freeze_bn, mixstyle)
+        train_metrics = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True, args.freeze_bn, mixstyle, use_contrastive)
+        val_metrics = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False, args.freeze_bn, mixstyle, use_contrastive)
         learning_rates = {group["name"]: group["lr"] for group in optimizer.param_groups}
         record = {"epoch": epoch, "stage": stage, "learning_rates": learning_rates, "train": train_metrics, "validation": val_metrics}
         history.append(record)
-        if val_metrics["balanced_accuracy"] > best_balanced:
+        improved = val_metrics["balanced_accuracy"] > best_balanced
+        if improved:
             best_accuracy = val_metrics["accuracy"]
             best_balanced = val_metrics["balanced_accuracy"]
             stale = 0
         else:
             stale += 1
-        print(f"epoch={epoch:02d} stage={stage} train_loss={train_metrics['loss']:.5f} train_acc={train_metrics['accuracy']:.4f} val_loss={val_metrics['loss']:.5f} val_acc={val_metrics['accuracy']:.4f} val_balanced={val_metrics['balanced_accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} worst_session={val_metrics['worst_session_accuracy']:.4f}")
+        positive_similarity = train_metrics["mean_cross_session_positive_similarity"]
+        similarity_text = "n/a" if positive_similarity is None else f"{positive_similarity:.4f}"
+        print(f"epoch={epoch:02d} stage={stage} train_loss={train_metrics['loss']:.5f} train_ce={train_metrics['classification_loss']:.5f} train_contrastive={train_metrics['contrastive_loss']:.5f} contrastive_weight={train_metrics['contrastive_weight']:.3f} train_pos_similarity={similarity_text} train_acc={train_metrics['accuracy']:.4f} val_loss={val_metrics['loss']:.5f} val_acc={val_metrics['accuracy']:.4f} val_balanced={val_metrics['balanced_accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} worst_session={val_metrics['worst_session_accuracy']:.4f}")
         print("  Learning rates: " + ", ".join(f"{name}={value:.3e}" for name, value in learning_rates.items() if value > 0))
         save_checkpoint(output_dir / "last.pt", model, optimizer, scheduler, epoch, best_accuracy, best_balanced, stale, training_config)
-        if val_metrics["balanced_accuracy"] >= best_balanced:
+        if improved:
             save_checkpoint(output_dir / "best.pt", model, optimizer, scheduler, epoch, best_accuracy, best_balanced, stale, training_config)
         (output_dir / "metrics.json").write_text(json.dumps(history, indent=2) + "\n")
         (output_dir / "training_config.json").write_text(json.dumps(asdict(training_config), indent=2) + "\n")
