@@ -176,6 +176,7 @@ The exporter produces fixed-shape Opset-13 ONNX files and validates the graph wi
 python dinov2/scripts/export-dinov2.py \
     --checkpoint /path/to/checkpoints/dinov2/best.pt \
     --output /path/to/hulk_hand_dinov2.onnx \
+    --attention-variant original \
     --gelu-approximation \
     --rewrite-pow
 ```
@@ -184,9 +185,24 @@ The target interface is:
 
 ```text
 Input:     [1, 3, 224, 224]
-Logits:    [1, 4]
-Embedding: [1, 384]
+Output:    logits [1, 4]
 Opset:     13
 ```
+
+The exporter supports four attention implementations. They all reuse the
+trained DINOv2 weights and are mathematically equivalent in PyTorch inference:
+
+```text
+original       existing explicit attention (5-D QKV reshape, 4-D MatMul)
+split-qkv      split Q/K/V before head reshaping (no 5-D combined QKV tensor)
+flatten-heads  flatten batch and heads for 3-D attention MatMul
+separate-heads unroll the six heads and use only 2-D attention MatMul
+```
+
+Use a separate output file for each variant. The exporter validates Opset 13,
+the fixed input/output shapes, ONNX graph integrity, and the maximum absolute
+PyTorch-vs-ONNX logits difference. It also reports inferred attention tensor
+ranks and operator counts. Converter compatibility and full validation remain
+external tests and are not claimed by this source-level implementation.
 
 Export-time compatibility changes do not modify the checkpoint or require retraining. Resize conversion is not recommended because changing DINOv2's positional-embedding interpolation caused a significant numerical deviation.

@@ -24,13 +24,13 @@ SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from model import build_model  # noqa: E402
+from model import ATTENTION_VARIANTS, build_model  # noqa: E402
 
 
 IMAGE_SHAPE = (1, 3, 224, 224)
 OPSET = 13
 EMBEDDING_DIM = 384
-VARIANTS = ("baseline", "gelu", "pow", "resize", "all")
+GRAPH_VARIANTS = ("baseline", "gelu", "pow", "resize", "all")
 
 
 class ExportWrapper(nn.Module):
@@ -38,9 +38,9 @@ class ExportWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         outputs = self.model(x)
-        return outputs["logits"], outputs["embedding"]
+        return outputs["logits"]
 
 
 def load_checkpoint(path: Path) -> dict:
@@ -75,14 +75,15 @@ def replace_gelu_modules(module: nn.Module) -> int:
     return replaced
 
 
-def build_export_model(checkpoint: dict, variant: str) -> ExportWrapper:
+def build_export_model(checkpoint: dict, attention_variant: str, graph_variant: str) -> ExportWrapper:
     model = build_model(
         num_classes=int(checkpoint["num_classes"]),
         pretrained=False,
+        attention_variant=attention_variant,
     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
 
-    if "gelu" in variant or variant == "all":
+    if "gelu" in graph_variant or graph_variant == "all":
         replaced = replace_gelu_modules(model)
         print(f"GELU modules replaced: {replaced}")
 
@@ -144,20 +145,20 @@ def rewrite_resize_as_linear(model: onnx.ModelProto) -> int:
     return rewritten
 
 
-def rewrite_graph(path: Path, variant: str) -> tuple[int, int]:
+def rewrite_graph(path: Path, graph_variant: str) -> tuple[int, int]:
     model = onnx.load(str(path))
     pow_count = 0
     resize_count = 0
-    if "pow" in variant or variant == "all":
+    if "pow" in graph_variant or graph_variant == "all":
         pow_count = rewrite_pow_as_mul(model)
-    if "resize" in variant or variant == "all":
+    if "resize" in graph_variant or graph_variant == "all":
         resize_count = rewrite_resize_as_linear(model)
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
     return pow_count, resize_count
 
 
-def validate_graph(path: Path, num_classes: int) -> None:
+def validate_graph(path: Path, num_classes: int, attention_variant: str) -> dict:
     model = onnx.load(str(path))
     onnx.checker.check_model(model)
     opsets = [
@@ -173,11 +174,61 @@ def validate_graph(path: Path, num_classes: int) -> None:
         raise RuntimeError(f"Unexpected input shape: {input_shape}")
 
     outputs = {output.name: output for output in model.graph.output}
-    expected = {"logits": [1, num_classes], "embedding": [1, EMBEDDING_DIM]}
+    expected = {"logits": [1, num_classes]}
     for name, shape in expected.items():
         actual = [dim.dim_value for dim in outputs[name].type.tensor_type.shape.dim]
         if actual != shape:
             raise RuntimeError(f"Unexpected {name} shape: {actual}")
+
+    report = inspect_attention_graph(model)
+    max_matmul_rank = {"original": 4, "split-qkv": 4, "flatten-heads": 3, "separate-heads": 2}[attention_variant]
+    if attention_variant == "split-qkv" and report["attention_max_tensor_rank"] > 4:
+        raise RuntimeError("split-qkv graph still contains a 5-D attention tensor")
+    if attention_variant in ("flatten-heads", "separate-heads") and report["attention_matmul_ranks"]:
+        if max(report["attention_matmul_ranks"]) > max_matmul_rank:
+            raise RuntimeError(
+                f"{attention_variant} graph contains an attention MatMul above rank {max_matmul_rank}: "
+                f"{report['attention_matmul_ranks']}"
+            )
+    return report
+
+
+def inspect_attention_graph(model: onnx.ModelProto) -> dict:
+    """Return operator counts and inferred ranks for attention nodes."""
+    try:
+        inferred = onnx.shape_inference.infer_shapes(model)
+    except Exception:
+        inferred = model
+    shape_map = {}
+    values = list(inferred.graph.value_info) + list(inferred.graph.input) + list(inferred.graph.output)
+    for value in values:
+        dimensions = value.type.tensor_type.shape.dim
+        if dimensions:
+            shape_map[value.name] = [dimension.dim_value for dimension in dimensions]
+    attention_nodes = [
+        node for node in inferred.graph.node
+        if "attn" in node.name.lower() or "attention" in node.name.lower()
+    ]
+    matmul_ranks = []
+    max_tensor_rank = 0
+    for node in attention_nodes:
+        for value_name in list(node.input) + list(node.output):
+            max_tensor_rank = max(max_tensor_rank, len(shape_map.get(value_name, [])))
+        if node.op_type == "MatMul":
+            matmul_ranks.extend(
+                len(shape_map.get(value_name, []))
+                for value_name in node.input
+                if shape_map.get(value_name)
+            )
+    return {
+        "attention_node_count": len(attention_nodes),
+        "attention_max_tensor_rank": max_tensor_rank,
+        "attention_matmul_ranks": matmul_ranks,
+        "op_counts": {
+            op: sum(node.op_type == op for node in inferred.graph.node)
+            for op in sorted({node.op_type for node in inferred.graph.node})
+        },
+    }
 
 
 @torch.inference_mode()
@@ -185,27 +236,49 @@ def compare_with_onnx(
     wrapper: ExportWrapper,
     path: Path,
     dummy_input: torch.Tensor,
-) -> tuple[float, float]:
-    torch_logits, torch_embedding = wrapper(dummy_input)
+) -> float:
+    torch_logits = wrapper(dummy_input)
     session = ort.InferenceSession(
         str(path), providers=["CPUExecutionProvider"]
     )
-    onnx_logits, onnx_embedding = session.run(
-        ["logits", "embedding"],
+    onnx_logits = session.run(
+        ["logits"],
         {"input": dummy_input.numpy().astype(np.float32)},
-    )
-    logits_diff = float(np.max(np.abs(torch_logits.numpy() - onnx_logits)))
-    embedding_diff = float(np.max(np.abs(torch_embedding.numpy() - onnx_embedding)))
-    return logits_diff, embedding_diff
+    )[0]
+    return float(np.max(np.abs(torch_logits.numpy() - onnx_logits)))
+
+
+def compare_onnx_variants(paths: dict[str, Path], dummy_input: torch.Tensor) -> dict[str, float]:
+    """Compare logits across already exported ONNX variants without exporting them."""
+    outputs = {}
+    for name, path in paths.items():
+        session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        input_name = session.get_inputs()[0].name
+        outputs[name] = session.run(["logits"], {input_name: dummy_input.numpy().astype(np.float32)})[0]
+    reference_name = next(iter(outputs))
+    reference = outputs[reference_name]
+    return {
+        name: float(np.max(np.abs(values - reference)))
+        for name, values in outputs.items()
+        if name != reference_name
+    }
+
+
+def accuracy_from_logits(logits: np.ndarray, labels: np.ndarray) -> float:
+    """Calculate accuracy for later PyTorch/ONNX validation comparisons."""
+    if len(labels) == 0:
+        return 0.0
+    return float(np.mean(np.argmax(logits, axis=1) == labels))
 
 
 def export_variant(
     checkpoint: dict,
-    variant: str,
+    attention_variant: str,
+    graph_variant: str,
     output_path: Path,
     seed: int,
 ) -> None:
-    wrapper = build_export_model(checkpoint, variant)
+    wrapper = build_export_model(checkpoint, attention_variant, graph_variant)
     dummy_input = torch.randn(IMAGE_SHAPE, dtype=torch.float32)
     temporary_path = output_path.with_suffix(".tmp.onnx")
     if temporary_path.exists():
@@ -217,18 +290,18 @@ def export_variant(
         str(temporary_path),
         export_params=True,
         input_names=["input"],
-        output_names=["logits", "embedding"],
+        output_names=["logits"],
         opset_version=OPSET,
         do_constant_folding=True,
         dynamic_axes=None,
         dynamo=False,
     )
 
-    pow_count, resize_count = rewrite_graph(temporary_path, variant)
-    validate_graph(temporary_path, int(checkpoint["num_classes"]))
+    pow_count, resize_count = rewrite_graph(temporary_path, graph_variant)
+    graph_report = validate_graph(temporary_path, int(checkpoint["num_classes"]), attention_variant)
     torch.manual_seed(seed)
     dummy_input = torch.randn(IMAGE_SHAPE, dtype=torch.float32)
-    logits_diff, embedding_diff = compare_with_onnx(
+    logits_diff = compare_with_onnx(
         wrapper, temporary_path, dummy_input
     )
     temporary_path.replace(output_path)
@@ -237,7 +310,7 @@ def export_variant(
     print(f"  Pow rewrites:    {pow_count}")
     print(f"  Resize rewrites: {resize_count}")
     print(f"  Logits max diff:  {logits_diff:.8f}")
-    print(f"  Embed max diff:   {embedding_diff:.8f}")
+    print(f"  Attention graph:  {graph_report}")
 
 
 def main() -> None:
@@ -246,6 +319,12 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--attention-variant",
+        choices=ATTENTION_VARIANTS,
+        default="original",
+        help="Attention implementation used in the export graph.",
+    )
     parser.add_argument(
         "--gelu-approximation",
         action="store_true",
@@ -272,12 +351,12 @@ def main() -> None:
         selected.append("pow")
     if args.linear_resize:
         selected.append("resize")
-    variant = "_".join(selected) if selected else "baseline"
-    if variant == "gelu_pow_resize":
-        variant = "all"
+    graph_variant = "_".join(selected) if selected else "baseline"
+    if graph_variant == "gelu_pow_resize":
+        graph_variant = "all"
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    export_variant(checkpoint, variant, args.output, args.seed)
+    export_variant(checkpoint, args.attention_variant, graph_variant, args.output, args.seed)
 
 
 if __name__ == "__main__":
