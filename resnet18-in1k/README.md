@@ -151,6 +151,28 @@ remains a negative class. The 512-D pooled ResNet18 embedding is used
 directly; no projection head or deployment component is added. Checkpoint
 selection remains based on Balanced Validation Accuracy.
 
+## ONNX and TFLite export
+
+Install the optional conversion dependencies:
+
+```bash
+python3 -m pip install -r resnet18-in1k/requirements-export.txt
+```
+
+Export the newest run's checkpoint (usually `best.pt`) to both formats:
+
+```bash
+python3 resnet18-in1k/scripts/export_all.py \
+  --checkpoint /path/to/checkpoints/resnet18-in1k-session-contrastive/best.pt \
+  --output-dir /path/to/checkpoints/resnet18-in1k-session-contrastive/export
+```
+
+The exporter validates the four-class mapping, writes fixed-shape ONNX
+Opset 13 logits, compares ONNX output against PyTorch, and converts the ONNX
+graph to TFLite via `onnx2tf`. Preprocessing is not embedded. ONNX expects
+`[1, 3, 224, 224]`; TFLite may expose the equivalent NHWC input
+`[1, 224, 224, 3]`.
+
 ## Evaluation
 
 Before changing the training recipe, inspect the session/domain failure mode
