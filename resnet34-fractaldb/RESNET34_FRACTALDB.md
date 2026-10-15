@@ -154,3 +154,21 @@ Before training, the script reports teacher accuracy on clean and augmented
 beyond the configured limit (`--max-teacher-augmentation-drop`, default 10%).
 Teacher and student receive the same augmented image; only their normalization
 paths are separate. The output contains only the ResNet34 student weights.
+
+## Validation diagnosis: DINOv2 vs. ResNet34
+
+Compare the best student checkpoint and the local DINOv2 teacher without
+starting training:
+
+```bash
+python3 resnet34-fractaldb/scripts/diagnose-distillation-validation.py \
+  --data-dir /path/to/private/Dataset \
+  --teacher-checkpoint /path/to/dinov2/best.pt \
+  --student-checkpoint /path/to/resnet34-distill/best.pt \
+  --grid-output /path/to/resnet34-distill/validation-errors.png
+```
+
+The command evaluates exactly the same `S-V` files with deterministic,
+checkpoint-specific preprocessing, reports accuracy/agreement/KL by class and
+session, and writes up to 30 teacher-correct/student-wrong examples. It does
+not create an optimizer or modify either checkpoint.

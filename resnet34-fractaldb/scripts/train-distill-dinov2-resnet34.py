@@ -283,7 +283,7 @@ def print_validation_metrics(class_correct, class_total, session_correct, sessio
     return balanced
 
 
-def run_epoch(student, teacher, loader, optimizer, device, training: bool):
+def run_epoch(student, teacher, loader, optimizer, device, training: bool, epoch: int):
     if training:
         set_student_modes(student)
     else:
@@ -347,6 +347,7 @@ def run_epoch(student, teacher, loader, optimizer, device, training: bool):
         ) / len(CLASS_NAMES),
     }
     if not training:
+        print(f"\nValidation diagnostics for epoch {epoch:02d}")
         metrics["balanced_accuracy"] = print_validation_metrics(class_correct, class_total, session_correct, session_total, confusion)
     return metrics
 
@@ -473,8 +474,8 @@ def main() -> None:
     for epoch in range(1, MAX_EPOCHS + 1):
         stage = set_student_stage(student, epoch)
         scheduler.step(epoch)
-        train_metrics = run_epoch(student, teacher, train_loader, optimizer, device, True)
-        val_metrics = run_epoch(student, teacher, val_loader, optimizer, device, False)
+        train_metrics = run_epoch(student, teacher, train_loader, optimizer, device, True, epoch)
+        val_metrics = run_epoch(student, teacher, val_loader, optimizer, device, False, epoch)
         learning_rates = {group["name"]: group["lr"] for group in optimizer.param_groups}
         record = {"epoch": epoch, "stage": stage, "learning_rates": learning_rates, "train": train_metrics, "validation": val_metrics}
         history.append(record)
