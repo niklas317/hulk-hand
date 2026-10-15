@@ -12,6 +12,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +80,17 @@ def convert_tflite(onnx_path: Path, saved_model_dir: Path, tflite_path: Path) ->
     if saved_model_dir.exists():
         raise FileExistsError(f"SavedModel directory already exists: {saved_model_dir}")
     saved_model_dir.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([converter, "-i", str(onnx_path), "-o", str(saved_model_dir)], check=True)
+    # onnx2tf downloads a calibration sample by default. Supplying a local
+    # valid sample avoids network/cache failures and keeps export reproducible.
+    calibration_name = "calibration_image_sample_data_20x128x128x3_float32.npy"
+    with tempfile.TemporaryDirectory(prefix="resnet18-onnx2tf-") as work_dir:
+        calibration_path = Path(work_dir) / calibration_name
+        np.save(calibration_path, np.random.default_rng(0).standard_normal((20, 128, 128, 3), dtype=np.float32))
+        subprocess.run(
+            [converter, "-i", str(onnx_path), "-o", str(saved_model_dir), "-nuo", "-n"],
+            check=True,
+            cwd=work_dir,
+        )
 
     try:
         import tensorflow as tf
