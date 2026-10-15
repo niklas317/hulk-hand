@@ -96,6 +96,7 @@ class BalancedBatchSampler(Sampler[list[int]]):
                 "Every class must have at least one training image in sessions A-R; "
                 f"missing: {', '.join(missing)}."
             )
+        self.dataset = dataset
         self.grouped = grouped
         self.seed = seed
         self.epoch = 0
