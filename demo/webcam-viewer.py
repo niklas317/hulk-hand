@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import importlib.util
 from pathlib import Path
 from typing import List
 
@@ -19,6 +20,14 @@ from dinov2_preprocessing import (  # noqa: E402
     PreprocessConfig as DinoPreprocessConfig,
     preprocess_bgr_frame as preprocess_dinov2_frame,
 )
+
+_IN1K_PATH = Path(__file__).resolve().parents[1] / "resnet18-in1k" / "preprocessing" / "in1k_preprocessing.py"
+_IN1K_SPEC = importlib.util.spec_from_file_location("resnet18_in1k_preprocessing", _IN1K_PATH)
+if _IN1K_SPEC is None or _IN1K_SPEC.loader is None:
+    raise RuntimeError(f"Could not load ResNet18-IN1K preprocessing: {_IN1K_PATH}")
+in1k_preprocessing = importlib.util.module_from_spec(_IN1K_SPEC)
+sys.modules[_IN1K_SPEC.name] = in1k_preprocessing
+_IN1K_SPEC.loader.exec_module(in1k_preprocessing)
 
 
 """
@@ -67,11 +76,15 @@ def preprocess_frame(
         "resnet18",
         "resnet18-fractaldb",
         "resnet34-fractaldb",
-        "resnet152-custom-layer4",
     ):
         return preprocess_bgr_frame(
             frame,
             PreprocessConfig(image_size=image_size),
+        )
+    if preprocessing == "resnet18-in1k":
+        return in1k_preprocessing.preprocess_bgr_frame(
+            frame,
+            in1k_preprocessing.PreprocessConfig(image_size=image_size),
         )
     return preprocess_dinov2_frame(
         frame,
@@ -117,7 +130,7 @@ def main() -> None:
             "resnet18",
             "resnet18-fractaldb",
             "resnet34-fractaldb",
-            "resnet152-custom-layer4",
+            "resnet18-in1k",
             "dinov2",
         ),
         help="Preprocessing pipeline matching the selected model.",
