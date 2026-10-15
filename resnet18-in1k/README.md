@@ -94,6 +94,20 @@ stores the corresponding balanced accuracy.
 
 ## Evaluation
 
+Before changing the training recipe, inspect the session/domain failure mode
+with deterministic validation and layer4 Grad-CAM:
+
+```bash
+python3 resnet18-in1k/scripts/diagnose.py \
+  --data-dir /path/to/private/Dataset \
+  --checkpoint /path/to/checkpoints/resnet18-in1k-robust-v2/best.pt \
+  --output-dir /path/to/checkpoints/resnet18-in1k-robust-v2/diagnosis
+```
+
+This writes validation logits, per-class/per-session metrics, input RGB
+statistics by session, and Grad-CAM grids for up to five errors per class and
+session. It does not train or modify the checkpoint.
+
 Validation diagnosis:
 
 ```bash
