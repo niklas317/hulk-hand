@@ -49,31 +49,39 @@ def build_eval_transform(config: PreprocessConfig = PreprocessConfig()):
     )
 
 
-def build_train_transform(config: PreprocessConfig = PreprocessConfig(), augment: bool = True):
-    """Build FractalDB-style preprocessing with private-session augmentation."""
-    operations = []
-    if augment:
-        operations.extend(
-            [
-                transforms.RandomApply(
-                    [transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.02)],
-                    p=0.8,
-                ),
-                transforms.RandomAffine(
-                    degrees=12,
-                    translate=(0.06, 0.06),
-                    scale=(0.94, 1.06),
-                    shear=3,
-                    interpolation=InterpolationMode.BILINEAR,
-                    fill=(config.fill,) * 3,
-                ),
-            ]
-        )
-    operations.extend(
+def build_shared_augmentation(config: PreprocessConfig = PreprocessConfig()):
+    """Return the stochastic image-only transform used by teacher and student."""
+    return transforms.Compose(
         [
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.02)],
+                p=0.8,
+            ),
+            transforms.RandomAffine(
+                degrees=12,
+                translate=(0.06, 0.06),
+                scale=(0.94, 1.06),
+                shear=3,
+                interpolation=InterpolationMode.BILINEAR,
+                fill=(config.fill,) * 3,
+            ),
             transforms.Lambda(lambda image: letterbox_square(image, config.image_size, config.fill)),
-            transforms.ToTensor(),
-            transforms.Normalize(config.mean, config.std),
         ]
     )
-    return transforms.Compose(operations)
+
+
+def build_normalized_transform(mean=IMAGENET_MEAN, std=IMAGENET_STD):
+    """Convert an already geometrically processed image to a normalized tensor."""
+    return transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
+
+
+def build_train_transform(config: PreprocessConfig = PreprocessConfig(), augment: bool = True):
+    """Build FractalDB-style preprocessing with private-session augmentation."""
+    if not augment:
+        return build_eval_transform(config)
+    return transforms.Compose(
+        [
+            build_shared_augmentation(config),
+            build_normalized_transform(config.mean, config.std),
+        ]
+    )

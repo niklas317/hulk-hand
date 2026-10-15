@@ -30,7 +30,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PIPELINE_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = PIPELINE_ROOT.parent
 sys.path.insert(0, str(PIPELINE_ROOT / "preprocessing"))
-from fractaldb_preprocessing import PreprocessConfig, build_eval_transform, build_train_transform
+from fractaldb_preprocessing import (
+    PreprocessConfig,
+    build_eval_transform,
+    build_normalized_transform,
+    build_shared_augmentation,
+    build_train_transform,
+)
 
 
 CLASS_NAMES = ["gesture_1", "gesture_2", "gesture_3", "no_gesture"]
@@ -54,27 +60,6 @@ EARLY_STOPPING_PATIENCE = 4
 HEAD_ONLY_EPOCHS = 3
 LAYER4_START_EPOCH = HEAD_ONLY_EPOCHS + 1
 FULL_BACKBONE_START_EPOCH = 7
-
-
-def configure_experiment(name: str) -> None:
-    """Apply the requested experiment without changing the model or checkpoint."""
-    global BACKBONE_LR, CLASSIFIER_LR, LABEL_SMOOTHING
-    global EARLY_STOPPING_PATIENCE, FULL_BACKBONE_START_EPOCH
-    if name == "E1":
-        # Previous training recipe; only the corrected augmentation changes.
-        BACKBONE_LR = 3e-5
-        CLASSIFIER_LR = 3e-4
-        LABEL_SMOOTHING = 0.1
-        EARLY_STOPPING_PATIENCE = 4
-        FULL_BACKBONE_START_EPOCH = 7
-    elif name in {"E2", "E3"}:
-        BACKBONE_LR = 1e-5
-        CLASSIFIER_LR = 3e-4
-        LABEL_SMOOTHING = 0.05
-        EARLY_STOPPING_PATIENCE = 7
-        FULL_BACKBONE_START_EPOCH = MAX_EPOCHS + 1
-    else:
-        raise ValueError(f"Unknown experiment: {name}")
 
 
 @dataclass(frozen=True)
@@ -277,7 +262,7 @@ def build_scheduler(optimizer: AdamW) -> SequentialLR:
     )
 
 
-def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool, freeze_bn: bool = False) -> tuple[float, float]:
+def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training: bool) -> tuple[float, float]:
     model.train(training)
     if training:
         for module in (
@@ -288,10 +273,6 @@ def run_epoch(model, loader, criterion, optimizer, device, epoch: int, training:
             model.backbone.layer4,
         ):
             if not any(parameter.requires_grad for parameter in module.parameters()):
-                module.eval()
-    if training and freeze_bn:
-        for module in model.modules():
-            if isinstance(module, nn.BatchNorm2d):
                 module.eval()
     total_loss = total_correct = total_samples = 0
     class_correct: dict[str, int] = defaultdict(int)
@@ -377,8 +358,6 @@ class TrainingConfig:
     test_sessions: tuple[str, ...]
     initialization: str
     preprocessing: str
-    experiment: str
-    freeze_bn: bool
 
 
 def save_checkpoint(path: Path, model, optimizer, scheduler, epoch: int, best_accuracy: float, counter: int, classes: list[str], config: TrainingConfig) -> None:
@@ -435,24 +414,14 @@ def freeze_first_stage(model: ResNet34WithEmbedding) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fine-tune a FractalDB-pretrained ResNet34 on private NEW sessions.")
     parser.add_argument("--data-dir", type=Path, required=True, help="Private dataset containing class/session directories")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Dedicated output directory for this experiment")
-    parser.add_argument("--experiment", choices=("E1", "E2", "E3"), default="E1")
-    parser.add_argument("--freeze-bn", action=argparse.BooleanOptionalAction, default=None, help="Keep every BatchNorm2d module in eval mode during training")
-    parser.add_argument("--preview-dir", type=Path, default=None, help="Directory for augmented preview images")
+    parser.add_argument("--output-dir", type=Path, default=PIPELINE_ROOT / "artifacts" / "runs" / "resnet34-fractaldb")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--resume", type=Path, default=None, help="Optional matching last.pt checkpoint")
     args = parser.parse_args()
 
-    configure_experiment(args.experiment)
-    freeze_bn = args.freeze_bn if args.freeze_bn is not None else args.experiment == "E3"
-
     data_dir = args.data_dir.expanduser().resolve()
-    output_dir = (
-        args.output_dir
-        if args.output_dir is not None
-        else PIPELINE_ROOT / "artifacts" / "runs" / f"resnet34-fractaldb-{args.experiment.lower()}"
-    ).expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
     if not data_dir.is_dir():
         raise FileNotFoundError(f"Dataset directory not found: {data_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -469,13 +438,6 @@ def main() -> None:
     if len(train_dataset) == 0 or len(val_dataset) == 0:
         raise RuntimeError("Both NEW training sessions A-R and validation sessions S-V must contain images.")
 
-    print_dataset_summary("Training A-R", train_dataset)
-    print_dataset_summary("Validation S-V", val_dataset)
-    save_augmentation_preview(
-        train_dataset,
-        (args.preview_dir if args.preview_dir is not None else output_dir / "augmentation-preview").expanduser().resolve(),
-    )
-
     sampler = BalancedBatchSampler(train_dataset, args.seed)
     train_loader = DataLoader(train_dataset, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
@@ -489,17 +451,12 @@ def main() -> None:
     start_epoch = 1
     best_accuracy = float("-inf")
     stopping_counter = 0
-    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}), staged fine-tuning with layer1 frozen", "resnet34-fractaldb/preprocessing/fractaldb_preprocessing.py", args.experiment, freeze_bn)
+    config = TrainingConfig(str(data_dir), str(output_dir), args.seed, 224, BATCH_SIZE, BATCHES_PER_EPOCH, MAX_EPOCHS, TRAIN_SESSIONS, VAL_SESSIONS, TEST_SESSIONS, f"FractalDB pretrained weights ({FRACTALDB_MODEL_ID}), staged fine-tuning with layer1 frozen", "resnet34-fractaldb/preprocessing/fractaldb_preprocessing.py")
 
     if args.resume:
         checkpoint = torch.load(args.resume.expanduser().resolve(), map_location=device)
         if checkpoint.get("training_config", {}).get("initialization") != config.initialization:
             raise ValueError("Resume checkpoint is not a matching FractalDB ResNet34 checkpoint.")
-        saved_config = checkpoint.get("training_config", {})
-        if saved_config.get("experiment") != args.experiment or bool(saved_config.get("freeze_bn")) != freeze_bn:
-            raise ValueError(
-                "Resume checkpoint belongs to a different experiment or BatchNorm configuration."
-            )
         if checkpoint.get("classes") != CLASS_NAMES:
             raise ValueError(
                 "Resume checkpoint has incompatible class names; expected "
@@ -513,12 +470,12 @@ def main() -> None:
         stopping_counter = int(checkpoint["early_stopping_counter"])
 
     criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    print(f"Training FractalDB ResNet34 {args.experiment} on NEW sessions A-R; device={device}; train={len(train_dataset)}; val={len(val_dataset)}; freeze_bn={freeze_bn}")
+    print(f"Training FractalDB ResNet34 on NEW sessions A-R; device={device}; train={len(train_dataset)}; val={len(val_dataset)}")
     for epoch in range(start_epoch, MAX_EPOCHS + 1):
         stage = set_training_stage(model, epoch)
         sampler.set_epoch(epoch - 1)
-        train_loss, train_accuracy = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True, freeze_bn)
-        val_loss, val_accuracy = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False, freeze_bn)
+        train_loss, train_accuracy = run_epoch(model, train_loader, criterion, optimizer, device, epoch, True)
+        val_loss, val_accuracy = run_epoch(model, val_loader, criterion, optimizer, device, epoch, False)
         scheduler.step()
         improved = val_accuracy > best_accuracy
         if improved:

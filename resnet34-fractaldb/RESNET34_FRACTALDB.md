@@ -41,15 +41,8 @@ geometry-preserving preprocessing rather than the HaGRID normalization:
 
 The `resnet18-hagrid` preprocessing remains unchanged.
 
-Training uses session-balanced class batches and three explicit experiments:
-
-- `E1`: corrected augmentation and the previous staged training settings.
-- `E2`: backbone LR `1e-5`, classifier LR `3e-4`, label smoothing `0.05`,
-  patience `7`; classifier-only for epochs 1-3, then `layer4+classifier`.
-- `E3`: E2 plus `--freeze-bn` for all `BatchNorm2d` modules.
-
-All experiments keep `layer1` frozen. Each run writes an augmentation preview
-before training; inspect it for finger cropping before continuing.
+The reference trainer uses session-balanced class batches, warmup/cosine
+scheduling, and staged fine-tuning while keeping `layer1` frozen.
 
 ## Training
 
@@ -58,23 +51,7 @@ python3 -m pip install -r resnet34-fractaldb/requirements.txt
 
 python3 resnet34-fractaldb/scripts/train-resnet34-fractaldb.py \
   --data-dir /path/to/private/Dataset \
-  --experiment E1 \
-  --output-dir /path/to/checkpoints/resnet34-fractaldb-e1
-```
-
-Run E2 or E3 in separate directories:
-
-```bash
-python3 resnet34-fractaldb/scripts/train-resnet34-fractaldb.py \
-  --data-dir /path/to/private/Dataset \
-  --experiment E2 \
-  --output-dir /path/to/checkpoints/resnet34-fractaldb-e2
-
-python3 resnet34-fractaldb/scripts/train-resnet34-fractaldb.py \
-  --data-dir /path/to/private/Dataset \
-  --experiment E3 \
-  --output-dir /path/to/checkpoints/resnet34-fractaldb-e3 \
-  --freeze-bn
+  --output-dir /path/to/checkpoints/resnet34-fractaldb
 ```
 
 The first run downloads `model.safetensors` from Hugging Face. The checkpoint
@@ -85,9 +62,8 @@ Resume an interrupted run:
 ```bash
 python3 resnet34-fractaldb/scripts/train-resnet34-fractaldb.py \
   --data-dir /path/to/private/Dataset \
-  --experiment E2 \
-  --output-dir /path/to/checkpoints/resnet34-fractaldb-e2 \
-  --resume /path/to/checkpoints/resnet34-fractaldb-e2/last.pt
+  --output-dir /path/to/checkpoints/resnet34-fractaldb \
+  --resume /path/to/checkpoints/resnet34-fractaldb/last.pt
 ```
 
 ## Diagnosis
@@ -97,7 +73,7 @@ Evaluate the validation sessions `S-V`:
 ```bash
 python3 resnet34-fractaldb/scripts/diagnose-resnet34-fractaldb.py \
   --data-dir /path/to/private/Dataset \
-  --checkpoint /path/to/checkpoints/resnet34-fractaldb-e2/best.pt \
+  --checkpoint /path/to/checkpoints/resnet34-fractaldb/best.pt \
   --split validation
 ```
 
@@ -108,7 +84,7 @@ confusion matrix. After model selection, evaluate the untouched test sessions
 ```bash
 python3 resnet34-fractaldb/scripts/diagnose-resnet34-fractaldb.py \
   --data-dir /path/to/private/Dataset \
-  --checkpoint /path/to/checkpoints/resnet34-fractaldb-e2/best.pt \
+  --checkpoint /path/to/checkpoints/resnet34-fractaldb/best.pt \
   --split test
 ```
 
@@ -128,8 +104,8 @@ second output.
 
 ```bash
 python3 resnet34-fractaldb/scripts/export-resnet34-fractaldb.py \
-  --checkpoint /path/to/checkpoints/resnet34-fractaldb-e2/best.pt \
-  --output-dir resnet34-fractaldb-e2/export \
+  --checkpoint /path/to/checkpoints/resnet34-fractaldb/best.pt \
+  --output-dir resnet34-fractaldb/artifacts/export \
   --skip-tflite
 ```
 
@@ -140,3 +116,35 @@ python3 resnet34-fractaldb/scripts/check-onnx-opset.py \
   resnet34-fractaldb/artifacts/export/ResNet34_4class_opset13_dual_output.onnx \
   --expect 13
 ```
+
+## DINOv2 knowledge distillation
+
+The standalone distillation trainer uses a local, already fine-tuned DINOv2
+checkpoint as teacher. It validates the teacher on `S-V` before any student
+training and refuses to continue if the teacher is below the configured
+threshold (default: 80%). The teacher is never stored in the student
+checkpoint.
+
+Run the required preflight smoke test first:
+
+```bash
+python3 resnet34-fractaldb/scripts/train-distill-dinov2-resnet34.py \
+  --teacher-checkpoint /path/to/dinov2/best.pt \
+  --data-dir /path/to/private/Dataset \
+  --output-dir /path/to/checkpoints/resnet34-distill-smoke \
+  --smoke-test
+```
+
+Start a complete run in a fresh output directory:
+
+```bash
+python3 resnet34-fractaldb/scripts/train-distill-dinov2-resnet34.py \
+  --teacher-checkpoint /path/to/dinov2/best.pt \
+  --data-dir /path/to/private/Dataset \
+  --output-dir /path/to/checkpoints/resnet34-distill
+```
+
+Use `--freeze-bn` for the optional BatchNorm-frozen variant. The distillation
+loss uses `alpha=0.5`, temperature `2.0`, and label smoothing `0.05`. Teacher
+and student receive the same augmented image; only their normalization paths
+are separate. The output contains only the ResNet34 student weights.
