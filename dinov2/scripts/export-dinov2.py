@@ -38,9 +38,9 @@ class ExportWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         outputs = self.model(x)
-        return outputs["logits"]
+        return outputs["logits"], outputs["embedding"]
 
 
 def load_checkpoint(path: Path) -> dict:
@@ -174,7 +174,10 @@ def validate_graph(path: Path, num_classes: int, attention_variant: str) -> dict
         raise RuntimeError(f"Unexpected input shape: {input_shape}")
 
     outputs = {output.name: output for output in model.graph.output}
-    expected = {"logits": [1, num_classes]}
+    expected = {
+        "logits": [1, num_classes],
+        "embedding": [1, EMBEDDING_DIM],
+    }
     for name, shape in expected.items():
         actual = [dim.dim_value for dim in outputs[name].type.tensor_type.shape.dim]
         if actual != shape:
@@ -247,16 +250,19 @@ def compare_with_onnx(
     wrapper: ExportWrapper,
     path: Path,
     dummy_input: torch.Tensor,
-) -> float:
-    torch_logits = wrapper(dummy_input)
+) -> tuple[float, float]:
+    torch_logits, torch_embedding = wrapper(dummy_input)
     session = ort.InferenceSession(
         str(path), providers=["CPUExecutionProvider"]
     )
-    onnx_logits = session.run(
-        ["logits"],
+    onnx_logits, onnx_embedding = session.run(
+        ["logits", "embedding"],
         {"input": dummy_input.numpy().astype(np.float32)},
-    )[0]
-    return float(np.max(np.abs(torch_logits.numpy() - onnx_logits)))
+    )
+    return (
+        float(np.max(np.abs(torch_logits.numpy() - onnx_logits))),
+        float(np.max(np.abs(torch_embedding.numpy() - onnx_embedding))),
+    )
 
 
 def compare_onnx_variants(paths: dict[str, Path], dummy_input: torch.Tensor) -> dict[str, float]:
@@ -265,14 +271,18 @@ def compare_onnx_variants(paths: dict[str, Path], dummy_input: torch.Tensor) -> 
     for name, path in paths.items():
         session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
         input_name = session.get_inputs()[0].name
-        outputs[name] = session.run(["logits"], {input_name: dummy_input.numpy().astype(np.float32)})[0]
+        outputs[name] = session.run(
+            ["logits", "embedding"],
+            {input_name: dummy_input.numpy().astype(np.float32)},
+        )
     reference_name = next(iter(outputs))
-    reference = outputs[reference_name]
-    return {
-        name: float(np.max(np.abs(values - reference)))
-        for name, values in outputs.items()
-        if name != reference_name
-    }
+    reference_logits, reference_embedding = outputs[reference_name]
+    differences = {}
+    for name, (logits, embedding) in outputs.items():
+        if name != reference_name:
+            differences[f"{name}:logits"] = float(np.max(np.abs(logits - reference_logits)))
+            differences[f"{name}:embedding"] = float(np.max(np.abs(embedding - reference_embedding)))
+    return differences
 
 
 def accuracy_from_logits(logits: np.ndarray, labels: np.ndarray) -> float:
@@ -301,7 +311,7 @@ def export_variant(
         str(temporary_path),
         export_params=True,
         input_names=["input"],
-        output_names=["logits"],
+        output_names=["logits", "embedding"],
         opset_version=OPSET,
         do_constant_folding=True,
         dynamic_axes=None,
@@ -312,12 +322,13 @@ def export_variant(
     graph_report = validate_graph(temporary_path, int(checkpoint["num_classes"]), attention_variant)
     torch.manual_seed(seed)
     dummy_input = torch.randn(IMAGE_SHAPE, dtype=torch.float32)
-    logits_diff = compare_with_onnx(
+    logits_diff, embedding_diff = compare_with_onnx(
         wrapper, temporary_path, dummy_input
     )
-    if logits_diff > 1e-4:
+    if logits_diff > 1e-4 or embedding_diff > 1e-4:
         raise RuntimeError(
-            f"{attention_variant} is not numerically equivalent: logits max diff {logits_diff:.8f}"
+            f"{attention_variant} is not numerically equivalent: "
+            f"logits max diff {logits_diff:.8f}, embedding max diff {embedding_diff:.8f}"
         )
     temporary_path.replace(output_path)
 
@@ -325,6 +336,7 @@ def export_variant(
     print(f"  Pow rewrites:    {pow_count}")
     print(f"  Resize rewrites: {resize_count}")
     print(f"  Logits max diff:  {logits_diff:.8f}")
+    print(f"  Embed max diff:   {embedding_diff:.8f}")
     print(f"  Attention graph:  {graph_report}")
     if graph_report["rank_warnings"]:
         print("  Attention rank warnings: " + " | ".join(graph_report["rank_warnings"]))

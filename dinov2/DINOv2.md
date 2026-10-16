@@ -185,7 +185,7 @@ The target interface is:
 
 ```text
 Input:     [1, 3, 224, 224]
-Output:    logits [1, 4]
+Outputs:   logits [1, 4], embedding [1, 384]
 Opset:     13
 ```
 
@@ -201,8 +201,9 @@ separate-heads unroll the six heads and use only 2-D attention MatMul
 
 Use a separate output file for each variant. The exporter validates Opset 13,
 the fixed input/output shapes, ONNX graph integrity, and the maximum absolute
-PyTorch-vs-ONNX logits difference. It also reports inferred attention tensor
-ranks and operator counts. Converter compatibility and full validation remain
-external tests and are not claimed by this source-level implementation.
+PyTorch-vs-ONNX differences for both logits and embeddings. It also reports
+inferred attention tensor ranks and operator counts. Converter compatibility
+and full validation remain external tests and are not claimed by this
+source-level implementation.
 
 Export-time compatibility changes do not modify the checkpoint or require retraining. Resize conversion is not recommended because changing DINOv2's positional-embedding interpolation caused a significant numerical deviation.
