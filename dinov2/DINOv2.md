@@ -175,18 +175,42 @@ The exporter produces fixed-shape Opset-13 ONNX files and validates the graph wi
 ```bash
 python dinov2/scripts/export-dinov2.py \
     --checkpoint /path/to/checkpoints/dinov2/best.pt \
-    --output /path/to/hulk_hand_dinov2.onnx \
-    --gelu-approximation \
-    --rewrite-pow
+    --output /path/to/hulk_hand_dinov2.onnx
 ```
 
 The target interface is:
 
 ```text
 Input:     [1, 3, 224, 224]
-Logits:    [1, 4]
-Embedding: [1, 384]
+Outputs:   logits [1, 4], embedding [1, 384]
 Opset:     13
 ```
 
-Export-time compatibility changes do not modify the checkpoint or require retraining. Resize conversion is not recommended because changing DINOv2's positional-embedding interpolation caused a significant numerical deviation.
+The exporter has two attention modes. Both reuse the trained DINOv2 weights and
+produce the same two outputs:
+
+```text
+default        existing explicit attention (combined QKV reshape)
+--qkv-split    split Q/K/V before head reshaping (no combined QKV tensor)
+```
+
+The standard export uses the default attention mode. Use `--qkv-split` only
+when the target runtime has a compatibility problem with the combined QKV
+reshape:
+
+```bash
+python dinov2/scripts/export-dinov2.py \
+    --checkpoint /path/to/checkpoints/dinov2/best.pt \
+    --output /path/to/hulk_hand_dinov2_qkv_split.onnx \
+    --qkv-split
+```
+
+Use a separate output file for each mode. The exporter validates Opset 13,
+the fixed input/output shapes, ONNX graph integrity, and the maximum absolute
+PyTorch-vs-ONNX differences for both logits and embeddings. It also reports
+inferred attention tensor ranks and operator counts. Converter compatibility
+and full validation remain external tests and are not claimed by this
+source-level implementation.
+
+The QKV export mode changes only the attention graph used for export; it does
+not modify the checkpoint or require retraining.
