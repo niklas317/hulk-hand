@@ -20,13 +20,6 @@ IMAGE_SIZE = 224
 EMBEDDING_DIM = 384
 
 EXPECTED_ATTENTION_BLOCKS = 12
-ATTENTION_VARIANTS = (
-    "original",
-    "split-qkv",
-    "flatten-heads",
-    "separate-heads",
-)
-
 # V12:
 # Fine-tune the last ten transformer blocks.
 NUM_TRAINABLE_BLOCKS = 10
@@ -281,57 +274,6 @@ class SplitQKVSelfAttention(Opset13SelfAttention):
         return self.proj_drop(self.proj(output))
 
 
-class FlattenHeadsSelfAttention(SplitQKVSelfAttention):
-    """Attention variant using 3-D MatMul with batch and heads flattened."""
-
-    def forward(self, x: torch.Tensor, is_causal: bool = False) -> torch.Tensor:
-        batch_size, num_tokens, channels = x.shape
-        head_dim = channels // self.num_heads
-        query, key, value = torch.chunk(self.qkv(x), 3, dim=-1)
-        query = query.reshape(batch_size, num_tokens, self.num_heads, head_dim).permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, num_tokens, head_dim)
-        key = key.reshape(batch_size, num_tokens, self.num_heads, head_dim).permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, num_tokens, head_dim)
-        value = value.reshape(batch_size, num_tokens, self.num_heads, head_dim).permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, num_tokens, head_dim)
-        attention_scores = torch.matmul(query, key.transpose(1, 2)) * self.scale
-        if is_causal:
-            causal_mask = torch.tril(torch.ones((num_tokens, num_tokens), dtype=torch.bool, device=x.device))
-            attention_scores = attention_scores.masked_fill(~causal_mask, torch.finfo(attention_scores.dtype).min)
-        attention = F.softmax(attention_scores, dim=-1)
-        if self.training and self.attn_drop > 0.0:
-            attention = F.dropout(attention, p=self.attn_drop, training=True)
-        output = torch.matmul(attention, value)
-        output = output.reshape(batch_size, self.num_heads, num_tokens, head_dim).permute(0, 2, 1, 3).contiguous().reshape(batch_size, num_tokens, channels)
-        return self.proj_drop(self.proj(output))
-
-
-class SeparateHeadsSelfAttention(SplitQKVSelfAttention):
-    """Attention variant with one 2-D MatMul pair per head for static batch one."""
-
-    def forward(self, x: torch.Tensor, is_causal: bool = False) -> torch.Tensor:
-        batch_size, num_tokens, channels = x.shape
-        if batch_size != 1:
-            raise RuntimeError("separate-heads requires the fixed export batch size of 1")
-        head_dim = channels // self.num_heads
-        query, key, value = torch.chunk(self.qkv(x), 3, dim=-1)
-        query = query.reshape(batch_size, num_tokens, self.num_heads, head_dim)
-        key = key.reshape(batch_size, num_tokens, self.num_heads, head_dim)
-        value = value.reshape(batch_size, num_tokens, self.num_heads, head_dim)
-        head_outputs = []
-        for head_index in range(self.num_heads):
-            head_query = query[0, :, head_index, :]
-            head_key = key[0, :, head_index, :]
-            head_value = value[0, :, head_index, :]
-            attention_scores = torch.matmul(head_query, head_key.transpose(0, 1)) * self.scale
-            if is_causal:
-                causal_mask = torch.tril(torch.ones((num_tokens, num_tokens), dtype=torch.bool, device=x.device))
-                attention_scores = attention_scores.masked_fill(~causal_mask, torch.finfo(attention_scores.dtype).min)
-            attention = F.softmax(attention_scores, dim=-1)
-            if self.training and self.attn_drop > 0.0:
-                attention = F.dropout(attention, p=self.attn_drop, training=True)
-            head_outputs.append(torch.matmul(attention, head_value))
-        output = torch.stack(head_outputs, dim=0).transpose(0, 1).contiguous().reshape(batch_size, num_tokens, channels)
-        return self.proj_drop(self.proj(output))
-
-
 def _is_dinov2_attention(
     module: nn.Module,
 ) -> bool:
@@ -375,14 +317,12 @@ def replace_attention_for_opset13(
     Recursively replace DINOv2 attention modules.
     """
 
-    if attention_variant not in ATTENTION_VARIANTS:
+    if attention_variant not in ("original", "split-qkv"):
         raise ValueError(f"Unknown attention variant: {attention_variant}")
 
     replacement_types = {
         "original": Opset13SelfAttention,
         "split-qkv": SplitQKVSelfAttention,
-        "flatten-heads": FlattenHeadsSelfAttention,
-        "separate-heads": SeparateHeadsSelfAttention,
     }
     replacement_type = replacement_types[attention_variant]
     replaced = 0
@@ -860,4 +800,3 @@ def validate_trainable_parameters(
         raise RuntimeError(
             "Classifier is not trainable."
         )
-
